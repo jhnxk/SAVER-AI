@@ -1,0 +1,1715 @@
+<!DOCTYPE html>
+<html lang="ko" class="h-full bg-slate-900 text-slate-100">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SAVER-AI | 응급환자 병원 매칭 시스템</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            emergency: {
+              red: "#ef4444",
+              orange: "#f97316",
+              yellow: "#eab308",
+              blue: "#3b82f6",
+            },
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    .pulse-red { animation: pulseRed 2s infinite; }
+    @keyframes pulseRed {
+      0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+      70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+    }
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+    .button-label-two-line { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.15; white-space: normal; word-break: keep-all; text-align: center; }
+    .saver-action-button { min-height: 3.6rem; }
+    .route-map-box { width: 100%; height: 100%; }
+    .route-navigation-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      background: #020617;
+      color: #f8fafc;
+      display: none;
+      flex-direction: column;
+    }
+    .route-navigation-screen.active { display: flex; }
+    .nav-map-full { position: absolute; inset: 0; }
+    .nav-blue-guide {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 130;
+      background: #1976d2;
+      color: white;
+      min-height: 86px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      padding: 16px 22px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+    }
+    .nav-turn-arrow {
+      width: 44px;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.12);
+    }
+    .nav-distance-main {
+      font-size: 32px;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -0.04em;
+    }
+    .nav-road-name {
+      font-size: 13px;
+      color: rgba(255,255,255,0.86);
+      margin-top: 4px;
+    }
+    .nav-speed-circle {
+      position: absolute;
+      left: 24px;
+      top: 116px;
+      z-index: 135;
+      width: 78px;
+      height: 78px;
+      border-radius: 9999px;
+      background: white;
+      color: #111827;
+      border: 6px solid #ef4444;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 8px 22px rgba(0,0,0,0.25);
+      font-weight: 800;
+    }
+    .nav-speed-circle .speed-label { font-size: 10px; color: #64748b; line-height: 1; }
+    .nav-speed-circle .speed-value { font-size: 24px; line-height: 1; color: #111827; }
+    .nav-side-panel {
+      position: absolute;
+      right: 24px;
+      top: 116px;
+      z-index: 135;
+      width: min(360px, calc(100vw - 48px));
+      background: rgba(15, 23, 42, 0.92);
+      color: #f8fafc;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 12px 30px rgba(0,0,0,0.30);
+      backdrop-filter: blur(8px);
+    }
+    .nav-bottom-bar {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 130;
+      min-height: 70px;
+      background: rgba(255,255,255,0.96);
+      color: #0f172a;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 28px;
+      box-shadow: 0 -6px 20px rgba(0,0,0,0.18);
+    }
+    .nav-control-button {
+      border: 1px solid rgba(15,23,42,0.15);
+      background: white;
+      color: #0f172a;
+      border-radius: 9999px;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .nav-control-button.danger {
+      background: #ef4444;
+      border-color: #ef4444;
+      color: white;
+    }
+    @media (max-width: 768px) {
+      .nav-blue-guide { min-height: 76px; padding: 14px 16px; }
+      .nav-distance-main { font-size: 26px; }
+      .nav-side-panel { left: 16px; right: 16px; top: auto; bottom: 86px; width: auto; }
+      .nav-speed-circle { width: 66px; height: 66px; top: 96px; left: 16px; }
+      .nav-speed-circle .speed-value { font-size: 20px; }
+      .nav-bottom-bar { padding: 12px 16px; min-height: 64px; }
+    }
+  </style>
+  <link rel="stylesheet" href="/css/kakao_navigation.css">
+</head>
+<body class="h-full flex flex-col font-sans antialiased text-slate-100 bg-slate-950 overflow-x-hidden">
+  <header class="bg-slate-900 border-b border-slate-800 px-4 lg:px-8 py-3 sticky top-0 z-50 flex items-center justify-between shadow-lg">
+    <div class="flex items-center space-x-3">
+      <div class="bg-red-600 text-white p-2.5 rounded-xl shadow-lg shadow-red-600/30 flex items-center justify-center pulse-red">
+        <i class="fa-solid fa-truck-medical text-xl"></i>
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <h1 class="text-lg font-bold text-white tracking-wide">SAVER-AI</h1>
+          <span class="bg-red-500/20 text-red-400 text-xs px-2 py-0.5 rounded-full font-medium border border-red-500/30">Golden Time EMS</span>
+        </div>
+        <p class="text-xs text-slate-400">자연어 기반 응급환자 상태 분석 및 병원 수용 가능 여부 판별 시스템</p>
+      </div>
+    </div>
+    <div class="flex items-center space-x-3 text-xs">
+      <div class="hidden sm:flex items-center space-x-2 bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-lg">
+        <span class="relative flex h-2.5 w-2.5">
+          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+          <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+        </span>
+        <span class="text-slate-300 font-medium">Flask AI 서버 5050</span>
+      </div>
+      <a href="http://localhost:8501" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg font-medium transition">
+        <i class="fa-solid fa-database mr-1"></i>병원 DB 관리
+      </a>
+    </div>
+  </header>
+
+  <main class="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4 lg:p-6 max-w-[1920px] mx-auto w-full">
+    <section class="lg:col-span-4 flex flex-col gap-4">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
+            <i class="fa-solid fa-user-doctor text-emerald-400"></i><span>구급대원 자연어 환자상태 입력</span>
+          </h2>
+          <span class="text-[11px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700">Gemini NLP</span>
+        </div>
+
+        <div class="mb-3">
+          <p class="text-xs text-slate-400 mb-1.5 font-medium">시나리오 프리셋 선택:</p>
+          <div class="flex flex-wrap gap-1.5">
+            <button onclick="loadScenario(1)" class="text-xs bg-slate-800 hover:bg-slate-700 text-red-300 px-2.5 py-1 rounded-md border border-slate-700 transition"><i class="fa-solid fa-heart-pulse mr-1 text-red-400"></i>심근경색</button>
+            <button onclick="loadScenario(2)" class="text-xs bg-slate-800 hover:bg-slate-700 text-amber-300 px-2.5 py-1 rounded-md border border-slate-700 transition"><i class="fa-solid fa-brain mr-1 text-amber-400"></i>뇌졸중</button>
+            <button onclick="loadScenario(3)" class="text-xs bg-slate-800 hover:bg-slate-700 text-blue-300 px-2.5 py-1 rounded-md border border-slate-700 transition"><i class="fa-solid fa-car-crash mr-1 text-blue-400"></i>다발성 외상</button>
+            <button onclick="loadScenario(4)" class="text-xs bg-slate-800 hover:bg-slate-700 text-pink-300 px-2.5 py-1 rounded-md border border-slate-700 transition"><i class="fa-solid fa-person-pregnant mr-1 text-pink-400"></i>고위험 산모</button>
+            <button onclick="loadScenario(5)" class="text-xs bg-slate-800 hover:bg-slate-700 text-cyan-300 px-2.5 py-1 rounded-md border border-slate-700 transition"><i class="fa-solid fa-child mr-1 text-cyan-400"></i>소아 탈수</button>
+          </div>
+        </div>
+
+        <textarea id="patientInputText" rows="5" class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-xs sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition resize-none" placeholder="예: 70세 남성, 갑자기 말이 어눌해지고 오른쪽 팔에 힘이 빠졌습니다. 뇌졸중이 의심됩니다."></textarea>
+
+        <div class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <button id="btnRandomPatientLocation" onclick="generateRandomPatientLocationInSaver()" class="saver-action-button bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-2.5 px-4 rounded-lg text-xs sm:text-sm shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2 transition active:scale-95">
+            <i class="fa-solid fa-location-crosshairs"></i><span class="button-label-two-line"><span>환자 위치</span><span>랜덤 생성</span></span>
+          </button>
+          <button id="btnParsePatient" onclick="processPatientNLP()" class="saver-action-button bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2.5 px-4 rounded-lg text-xs sm:text-sm shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 transition active:scale-95">
+            <i class="fa-solid fa-microchip"></i><span class="button-label-two-line"><span>AI 분석</span><span>병원 필터링</span></span>
+          </button>
+          <button onclick="stopExecution()" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium py-2.5 px-4 rounded-lg text-xs sm:text-sm flex items-center justify-center gap-2 transition active:scale-95">
+            <i class="fa-solid fa-stop"></i><span>수행 멈춤</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl flex-1 flex flex-col">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-xs font-semibold text-slate-300 flex items-center gap-2"><i class="fa-solid fa-file-invoice text-indigo-400"></i><span>AI 추출 키워드 & 요구 의료자원 JSON</span></h3>
+          <span id="nlpStatusBadge" class="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded">대기 중</span>
+        </div>
+
+        <div id="parsedVisualBox" class="grid grid-cols-2 gap-2 mb-3 text-xs hidden">
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800"><span class="text-slate-400 text-[10px] block">환자 카테고리</span><span id="visCategory" class="font-bold text-emerald-400 text-sm">-</span></div>
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800"><span class="text-slate-400 text-[10px] block">추정 중증도</span><span id="visKtas" class="font-bold text-red-400 text-sm">-</span></div>
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800"><span class="text-slate-400 text-[10px] block">골든타임</span><span id="visGolden" class="font-bold text-amber-400 text-sm">-</span></div>
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800"><span class="text-slate-400 text-[10px] block">표시 추천 병원</span><span id="visAcceptCount" class="font-bold text-blue-400 text-sm">-</span></div>
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800 col-span-2"><span class="text-slate-400 text-[10px] block">필요 의료자원</span><div id="visReqs" class="flex flex-wrap gap-1 mt-1"></div></div>
+        </div>
+
+        <pre id="jsonOutput" class="bg-slate-950 border border-slate-800 rounded-lg p-3 text-[11px] font-mono text-emerald-400 overflow-y-auto flex-1 max-h-[300px]">{
+  "status": "ready",
+  "message": "환자 상태를 입력한 후 버튼을 누르세요."
+}</pre>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-xs font-semibold text-slate-200 flex items-center gap-2"><i class="fa-solid fa-diagram-project text-indigo-400"></i><span>알고리즘 모델 선택</span></h3>
+          <span id="ambulanceGpsBadge" class="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700">GPS 확인 중...</span>
+        </div>
+        <div class="grid grid-cols-1 gap-2" id="modelSelectionList">
+          <button type="button" data-model="A" onclick="selectModel('A')" class="model-option text-left text-xs bg-slate-800 border border-slate-700 rounded-lg p-2.5 transition hover:border-emerald-500/60">
+            <div class="flex items-center justify-between"><span class="font-semibold text-slate-100">Model A</span><span class="text-[10px] text-slate-400">최근접 병원</span></div>
+            <p class="text-[11px] text-slate-400 mt-1">가장 가까운 병원 추천 (구급차 위치 기준 최단 거리)</p>
+          </button>
+          <button type="button" data-model="B" onclick="selectModel('B')" class="model-option text-left text-xs bg-slate-800 border border-slate-700 rounded-lg p-2.5 transition hover:border-emerald-500/60">
+            <div class="flex items-center justify-between"><span class="font-semibold text-slate-100">Model B</span><span class="text-[10px] text-slate-400">MILP</span></div>
+            <p class="text-[11px] text-slate-400 mt-1">MILP 혼합정수선형계획 (수용점수·거리·혼잡도 목적함수 최적화)</p>
+          </button>
+          <button type="button" data-model="C" onclick="selectModel('C')" class="model-option text-left text-xs bg-slate-800 border border-slate-700 rounded-lg p-2.5 transition hover:border-emerald-500/60">
+            <div class="flex items-center justify-between"><span class="font-semibold text-slate-100">Model C</span><span class="text-[10px] text-slate-400">TOPSIS</span></div>
+            <p class="text-[11px] text-slate-400 mt-1">TOPSIS 다기준 의사결정 (이상해 근접도 기반 순위)</p>
+          </button>
+          <button type="button" data-model="D" onclick="selectModel('D')" class="model-option text-left text-xs bg-slate-800 border border-slate-700 rounded-lg p-2.5 transition hover:border-emerald-500/60">
+            <div class="flex items-center justify-between"><span class="font-semibold text-slate-100">Model D</span><span class="text-[10px] text-slate-400">가중치 종합점수</span></div>
+            <p class="text-[11px] text-slate-400 mt-1">수용점수·거리·전문의수·혼잡도 가중합 종합 점수</p>
+          </button>
+        </div>
+        <p class="text-[10px] text-slate-500 mt-2">선택한 모델은 다음 분석부터 적용됩니다. 현재 선택: <span id="currentModelLabel" class="text-emerald-400 font-semibold">Model A (가장 가까운 병원 추천)</span></p>
+      </div>
+    </section>
+
+    <section class="lg:col-span-8 flex flex-col gap-4">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <h2 class="text-sm font-semibold text-slate-100">병원 수용 가능 여부 판별 결과</h2>
+              <span id="filteredCountBadge" class="bg-slate-800 text-slate-400 text-xs px-2 py-0.5 rounded-full border border-slate-700">분석 전</span>
+              <span id="appliedModelBadge" class="bg-slate-800 text-indigo-300 text-xs px-2 py-0.5 rounded-full border border-slate-700">모델 미적용</span>
+            </div>
+            <p class="text-xs text-slate-400 mt-0.5">전체 병원을 계산한 뒤 수용 가능성·점수 기준 상위 10개만 표시합니다.</p>
+          </div>
+          <div class="flex items-center gap-1.5 text-xs bg-slate-950 p-1 rounded-lg border border-slate-800">
+            <button onclick="setTableFilter('all')" id="btnFilterAll" class="px-2.5 py-1 rounded bg-slate-800 text-white font-medium">전체</button>
+            <button onclick="setTableFilter('pass')" id="btnFilterPass" class="px-2.5 py-1 rounded text-slate-400 hover:text-white">수용 가능</button>
+            <button onclick="setTableFilter('fail')" id="btnFilterFail" class="px-2.5 py-1 rounded text-slate-400 hover:text-white">수용 불가</button>
+          </div>
+        </div>
+
+        <div class="overflow-x-auto rounded-lg border border-slate-800">
+          <table class="w-full text-left text-xs text-slate-300">
+            <thead class="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+              <tr>
+                <th class="p-2.5">순위 / 병원명</th>
+                <th class="p-2.5 text-center">수용 점수</th>
+                <th class="p-2.5 text-center">응급실 병상</th>
+                <th class="p-2.5 text-center">ICU 판단</th>
+                <th class="p-2.5 text-center">수술실</th>
+                <th class="p-2.5 text-center">필수 장비</th>
+                <th class="p-2.5">필수 진료과</th>
+                <th class="p-2.5 text-center">예상 이송시간</th>
+                <th class="p-2.5 text-center">예상 이송거리</th>
+                <th class="p-2.5 text-center">최종 판정</th>
+                <th class="p-2.5">주요 사유</th>
+              </tr>
+            </thead>
+            <tbody id="hospitalTableBody" class="divide-y divide-slate-800/60 bg-slate-900/50">
+              <tr><td colspan="11" class="p-6 text-center text-slate-500">아직 분석 결과가 없습니다. 왼쪽에서 환자 상태를 입력하고 실행하세요.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+        <div class="md:col-span-7 bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-xl flex flex-col">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2"><i class="fa-solid fa-map-location-dot text-indigo-400"></i><h3 class="text-xs font-semibold text-slate-200">이송 경로 표시</h3></div>
+            <span id="selectedHospitalRouteBadge" class="text-[11px] bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded border border-indigo-500/30">선택 병원 없음</span>
+          </div>
+          <!--
+            TODO: GPS + 카카오디벨로퍼 내비게이션 연동 파일을 이 영역에 삽입 예정.
+            '병원 사전 수용 신청 및 이송 시작' 버튼 클릭 시 startRouteGuidance(hospital)가 호출되며,
+            현재는 자리표시자만 있고 실제 경로안내 렌더링 로직은 아직 연결되어 있지 않다.
+          -->
+          <div id="routeDisplayContainer" class="relative w-full h-[260px] bg-slate-950 rounded-lg overflow-hidden border border-slate-800 flex items-center justify-center">
+            <div class="text-center text-slate-500 text-xs px-6">
+              <i class="fa-solid fa-route text-2xl mb-2 block"></i>
+              GPS + 카카오내비게이션 연동 예정 영역입니다.<br />
+              '병원 사전 수용 신청 및 이송 시작' 버튼을 누르면 이 자리에 실제 이동 경로가 표시될 예정입니다.
+            </div>
+          </div>
+        </div>
+
+        <div class="md:col-span-5 bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-xl flex flex-col justify-between">
+          <div>
+            <span class="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">선택된 병원</span>
+            <h4 id="targetHospName" class="text-base font-bold text-emerald-400 mt-0.5">아직 선택된 병원이 없습니다.</h4>
+            <div class="mt-3 space-y-2 text-xs">
+              <div class="flex justify-between p-2 bg-slate-950 rounded border border-slate-800"><span class="text-slate-400">수용 판정:</span><span id="targetAvailability" class="font-bold text-slate-200">-</span></div>
+              <div class="flex justify-between p-2 bg-slate-950 rounded border border-slate-800"><span class="text-slate-400">수용 점수:</span><span id="targetScore" class="font-bold text-amber-400">-</span></div>
+              <div class="flex justify-between p-2 bg-slate-950 rounded border border-slate-800"><span class="text-slate-400">필수 진료과 전문의 수:</span><span id="targetSpecialistCount" class="font-bold text-slate-200">-</span></div>
+              <div class="flex justify-between p-2 bg-slate-950 rounded border border-slate-800"><span class="text-slate-400">예상 이동 시간:</span><span id="targetEta" class="font-bold text-slate-200">시뮬레이션</span></div>
+              <div class="flex justify-between p-2 bg-slate-950 rounded border border-slate-800"><span class="text-slate-400">예상 이동 거리:</span><span id="targetDistance" class="font-bold text-slate-200">-</span></div>
+            </div>
+            <div class="mt-3 bg-slate-950 rounded border border-slate-800 p-3">
+              <p class="text-[10px] text-slate-400 mb-1">판정 사유</p>
+              <p id="targetReason" class="text-xs text-slate-300 leading-relaxed">병원을 선택하면 판정 사유가 표시됩니다.</p>
+            </div>
+          </div>
+          <button id="btnDispatch" onclick="dispatchAmbulance()" class="w-full mt-3 bg-red-600 hover:bg-red-500 text-white font-bold py-2.5 px-4 rounded-lg text-xs shadow-lg shadow-red-600/30 flex items-center justify-center gap-2 transition active:scale-95">
+            <i class="fa-solid fa-paper-plane"></i><span>병원 사전 수용 신청 및 이송 시작</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+        <h3 class="text-xs font-semibold text-slate-200 mb-2 flex items-center gap-2"><i class="fa-solid fa-circle-info text-blue-400"></i><span>판정 기준 설명</span></h3>
+        <p class="text-xs text-slate-400 leading-relaxed">
+          SAVER는 AI가 환자 상태에서 추출한 필수 진료과와 장비, ICU, 수술실, 응급실 가용병상 조건을 병원 DB와 비교합니다.
+          실시간 장비 컬럼은 1차 판단 기준이고, HIRA 의료장비정보는 실시간 값이 비어 있을 때 보조 근거로만 사용합니다.
+          과별 전문의 수는 필수 진료과를 통과한 병원의 우선순위를 정하는 보조 점수로 반영합니다.
+        </p>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-xs font-semibold text-slate-200 flex items-center gap-2"><i class="fa-solid fa-gauge-high text-amber-400"></i><span>모델 성능 검증</span></h3>
+          <span id="perfModelBadge" class="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700">분석 전</span>
+        </div>
+        <div id="perfMetricsGrid" class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800"><span class="text-slate-400 text-[10px] block">수용성공률</span><span id="perfAcceptRate" class="font-bold text-emerald-400 text-sm">-</span></div>
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800"><span class="text-slate-400 text-[10px] block">골든타임 준수율</span><span id="perfGoldenRate" class="font-bold text-amber-400 text-sm">-</span></div>
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800"><span class="text-slate-400 text-[10px] block">평균 ETA</span><span id="perfAvgEta" class="font-bold text-blue-400 text-sm">-</span></div>
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800"><span class="text-slate-400 text-[10px] block">P95 ETA</span><span id="perfP95Eta" class="font-bold text-blue-400 text-sm">-</span></div>
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800"><span class="text-slate-400 text-[10px] block">병원 혼잡도</span><span id="perfCongestion" class="font-bold text-rose-400 text-sm">-</span></div>
+          <div class="bg-slate-950 p-2.5 rounded border border-slate-800"><span class="text-slate-400 text-[10px] block">계산시간</span><span id="perfCompTime" class="font-bold text-slate-200 text-sm">-</span></div>
+        </div>
+        <details class="mt-3 group">
+          <summary class="cursor-pointer text-[11px] text-slate-400 hover:text-slate-200">채택/제외 지표 설명 보기</summary>
+          <div class="mt-2 text-[11px] text-slate-400 leading-relaxed bg-slate-950/70 border border-slate-800 rounded p-3 space-y-2">
+            <p><span class="text-emerald-400 font-semibold">채택 6개:</span> 수용성공률 · 골든타임 준수율 · 평균 ETA · P95 ETA · 병원 혼잡도 · 계산시간 — 이번 추천 1건의 응답만으로 바로 계산 가능한 지표들입니다.</p>
+            <p><span class="text-rose-400 font-semibold">제외 2개 (사유):</span></p>
+            <ul id="perfExcludedList" class="list-disc list-inside space-y-1"></ul>
+          </div>
+        </details>
+      </div>
+    </section>
+  </main>
+
+
+  <section id="routeNavigationScreen" class="route-navigation-screen">
+    <div id="navigationRouteMap" class="nav-map-full"></div>
+
+    <div class="nav-blue-guide">
+      <button id="btnCloseNavigation" type="button" class="nav-control-button danger mr-1">
+        <i class="fa-solid fa-arrow-left mr-1"></i>SAVER로 돌아가기
+      </button>
+      <div class="nav-turn-arrow">
+        <i id="navigationTurnIcon" class="fa-solid fa-arrow-turn-up"></i>
+      </div>
+      <div>
+        <div id="navigationNextDistance" class="nav-distance-main">경로 준비 중</div>
+        <div id="navigationRoadName" class="nav-road-name">선택 병원으로 이동 경로를 불러오는 중입니다.</div>
+      </div>
+    </div>
+
+    <div class="nav-speed-circle">
+      <div class="speed-label">현재속도</div>
+      <div><span id="navigationSpeed" class="speed-value">0</span></div>
+      <div class="speed-label">km/h</div>
+    </div>
+
+    <aside class="nav-side-panel">
+      <div class="text-[11px] text-slate-400 mb-1">목적지</div>
+      <div id="navigationHospitalName" class="text-lg font-extrabold text-emerald-400 leading-snug mb-3">선택 병원 없음</div>
+
+      <div class="grid grid-cols-2 gap-2 mb-3">
+        <div class="bg-slate-950 border border-slate-800 rounded-lg p-2">
+          <div class="text-[10px] text-slate-500">예상 소요시간</div>
+          <div id="navigationEta" class="text-xl font-bold text-emerald-300">-</div>
+        </div>
+        <div class="bg-slate-950 border border-slate-800 rounded-lg p-2">
+          <div class="text-[10px] text-slate-500">남은 거리</div>
+          <div id="navigationDistance" class="text-xl font-bold text-blue-300">-</div>
+        </div>
+      </div>
+
+      <div class="text-[11px] text-slate-400 mb-1">경로 상태</div>
+      <div id="navigationTrafficSummary" class="text-xs text-slate-300 leading-relaxed bg-slate-950 border border-slate-800 rounded-lg p-3">
+        병원 사전 수용 신청 후 이송 경로를 시작합니다.
+      </div>
+    </aside>
+
+    <div class="nav-bottom-bar">
+      <div>
+        <div id="navigationBottomStatus" class="text-sm font-bold">이송 경로 안내 대기 중</div>
+        <div id="navigationBottomSub" class="text-xs text-slate-500">카카오 경로 기반 시뮬레이션 화면입니다.</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="btnRecenterNavigation" type="button" class="nav-control-button">
+          <i class="fa-solid fa-route mr-1"></i>경로 전체 보기
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    async function loadKakaoSdkFromServerConfig() {
+      try {
+        const response = await fetch("/api/config");
+        const config = await response.json();
+        const appKey = config.kakao_javascript_key;
+
+        if (!appKey) {
+          console.error("KAKAO_JAVASCRIPT_KEY is empty. Check your .env file.");
+          return false;
+        }
+
+        return await new Promise((resolve) => {
+          if (window.kakao && window.kakao.maps) {
+            resolve(true);
+            return;
+          }
+
+          const script = document.createElement("script");
+          script.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${encodeURIComponent(appKey)}&libraries=services&autoload=false`;
+          script.async = true;
+
+          script.onload = () => {
+            if (!window.kakao || !window.kakao.maps) {
+              console.error("Kakao SDK script loaded but kakao.maps is unavailable.");
+              resolve(false);
+              return;
+            }
+            window.kakao.maps.load(() => resolve(true));
+          };
+
+          script.onerror = () => {
+            console.error("Failed to load Kakao Maps SDK script.");
+            resolve(false);
+          };
+
+          document.head.appendChild(script);
+        });
+      } catch (error) {
+        console.error("Failed to load /api/config for Kakao SDK", error);
+        return false;
+      }
+    }
+
+    const kakaoSdkReady = loadKakaoSdkFromServerConfig();
+  </script>
+  <script>
+    let latestBackendResults = [];
+    let currentFilterMode = "all";
+    let selectedModel = "A";
+    let ambulanceLat = null;
+    let ambulanceLng = null;
+    let latestPatient = null;
+    let selectedHospital = null;
+    let routePreviewMap = null;
+    let routePreviewLine = null;
+    let routePreviewMarkers = [];
+    let navigationRouteMap = null;
+    let navigationRouteLine = null;
+    let navigationMarkers = [];
+    let navigationAmbulanceMarker = null;
+    let navigationProgressLine = null;
+    let navigationRoutePath = [];
+    let navigationAnimationTimer = null;
+    let navigationAnimationIndex = 0;
+    let navigationHistoryPushed = false;
+    let latestSelectedRouteData = null;
+
+    // 백엔드(DEFAULT_AMBULANCE_LAT/LNG)와 동일한 기본 위치(대전광역시청).
+    const DEFAULT_AMBULANCE_LAT = 36.3504;
+    const DEFAULT_AMBULANCE_LNG = 127.3845;
+
+    const MODEL_LABELS = {
+      A: "Model A (가장 가까운 병원 추천)",
+      B: "Model B (MILP 혼합정수선형계획)",
+      C: "Model C (TOPSIS 다기준 의사결정)",
+      D: "Model D (가중치 종합 점수)"
+    };
+
+    function selectModel(modelKey) {
+      selectedModel = modelKey;
+      updateModelSelectionUI();
+    }
+
+    function updateModelSelectionUI() {
+      document.querySelectorAll(".model-option").forEach((btn) => {
+        const active = btn.dataset.model === selectedModel;
+        btn.classList.toggle("border-emerald-500", active);
+        btn.classList.toggle("bg-slate-800/80", active);
+        btn.classList.toggle("ring-1", active);
+        btn.classList.toggle("ring-emerald-500/40", active);
+      });
+      const label = document.getElementById("currentModelLabel");
+      if (label) label.textContent = MODEL_LABELS[selectedModel] || selectedModel;
+    }
+
+    function initAmbulanceLocation() {
+      const badge = document.getElementById("ambulanceGpsBadge");
+
+      const setFallback = (message) => {
+        ambulanceLat = DEFAULT_AMBULANCE_LAT;
+        ambulanceLng = DEFAULT_AMBULANCE_LNG;
+        if (badge) {
+          badge.textContent = message;
+          badge.className = "text-[10px] bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded border border-amber-500/30";
+        }
+      };
+
+      if (!("geolocation" in navigator)) {
+        setFallback("GPS 미지원(기본 위치 사용)");
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          ambulanceLat = pos.coords.latitude;
+          ambulanceLng = pos.coords.longitude;
+          if (badge) {
+            badge.textContent = "GPS 위치 확인됨";
+            badge.className = "text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/30";
+          }
+        },
+        () => setFallback("GPS 거부됨(기본 위치 사용)"),
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    }
+
+    function escapeHtml(value) {
+      if (value === null || value === undefined) return "";
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function safeValue(value, fallback = "-") {
+      if (value === null || value === undefined || value === "") return fallback;
+      return value;
+    }
+
+    function getHospitalLatLng(hospital) {
+      if (!hospital) return null;
+      const lat = Number(hospital.latitude ?? hospital.lat);
+      const lng = Number(hospital.longitude ?? hospital.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      return { lat, lng };
+    }
+
+    function setAmbulanceLocation(lat, lng, label) {
+      ambulanceLat = Number(lat);
+      ambulanceLng = Number(lng);
+      const badge = document.getElementById("ambulanceGpsBadge");
+      if (badge) {
+        badge.textContent = label || `환자 위치 ${ambulanceLat.toFixed(4)}, ${ambulanceLng.toFixed(4)}`;
+        badge.className = "text-[10px] bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded border border-indigo-500/30";
+      }
+    }
+
+    async function ensureKakaoMapLoaded() {
+      const loaded = await kakaoSdkReady;
+      return loaded && window.kakao && window.kakao.maps;
+    }
+
+    function extractRoutePath(route) {
+      const path = [];
+      if (!route || !Array.isArray(route.sections)) return path;
+
+      route.sections.forEach((section) => {
+        if (!Array.isArray(section.roads)) return;
+        section.roads.forEach((road) => {
+          if (!Array.isArray(road.vertexes)) return;
+          for (let i = 0; i < road.vertexes.length; i += 2) {
+            const lng = Number(road.vertexes[i]);
+            const lat = Number(road.vertexes[i + 1]);
+            if (Number.isFinite(lat) && Number.isFinite(lng)) {
+              path.push(new kakao.maps.LatLng(lat, lng));
+            }
+          }
+        });
+      });
+
+      return path;
+    }
+
+    function clearKakaoObjects(lineRef, markerList) {
+      if (lineRef) lineRef.setMap(null);
+      (markerList || []).forEach((marker) => marker.setMap(null));
+    }
+
+    async function requestRouteForHospital(hospital) {
+      const target = getHospitalLatLng(hospital);
+      if (!target) throw new Error("선택 병원의 좌표가 없습니다.");
+      if (ambulanceLat === null || ambulanceLng === null) throw new Error("환자 위치가 없습니다. GPS 확인 또는 환자 위치 랜덤 생성을 먼저 해주세요.");
+
+      const params = new URLSearchParams({
+        originLat: ambulanceLat,
+        originLng: ambulanceLng,
+        destinationLat: target.lat,
+        destinationLng: target.lng,
+      });
+
+      const response = await fetch(`/api/route?${params.toString()}`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || "카카오 경로 조회에 실패했습니다.");
+      if (!result.data || !Array.isArray(result.data.routes) || !result.data.routes.length) throw new Error("카카오 경로 결과가 없습니다.");
+
+      const route = result.data.routes[0];
+      latestSelectedRouteData = route;
+      return route;
+    }
+
+    function drawRouteOnMap(map, route, hospital, markerStoreName) {
+      const target = getHospitalLatLng(hospital);
+      const originPosition = new kakao.maps.LatLng(Number(ambulanceLat), Number(ambulanceLng));
+      const destPosition = new kakao.maps.LatLng(target.lat, target.lng);
+      const path = extractRoutePath(route);
+      const routePath = path.length ? path : [originPosition, destPosition];
+
+      const line = new kakao.maps.Polyline({
+        path: routePath,
+        strokeWeight: 6,
+        strokeColor: "#22c55e",
+        strokeOpacity: 0.9,
+        strokeStyle: "solid",
+      });
+      line.setMap(map);
+
+      const patientMarker = new kakao.maps.Marker({ map, position: originPosition });
+      const hospitalMarker = new kakao.maps.Marker({ map, position: destPosition });
+
+      const bounds = new kakao.maps.LatLngBounds();
+      routePath.forEach((point) => bounds.extend(point));
+      map.setBounds(bounds);
+
+      if (markerStoreName === "preview") {
+        routePreviewLine = line;
+        routePreviewMarkers = [patientMarker, hospitalMarker];
+      } else {
+        navigationRouteLine = line;
+        navigationMarkers = [patientMarker, hospitalMarker];
+      }
+    }
+
+    async function renderRoutePreview(hospital) {
+      const box = document.getElementById("routeDisplayContainer");
+      if (!box || !hospital) return;
+
+      const target = getHospitalLatLng(hospital);
+      if (!target) {
+        box.innerHTML = `<div class="text-center text-slate-500 px-4"><i class="fa-solid fa-triangle-exclamation text-xl mb-2 block"></i><p class="text-xs">선택 병원 좌표가 없어 경로를 표시할 수 없습니다.</p></div>`;
+        return;
+      }
+
+      if (!(await ensureKakaoMapLoaded())) {
+        box.innerHTML = `<div class="text-center text-amber-400 px-4"><p class="text-xs">카카오맵 SDK를 불러오지 못했습니다.</p><p class="text-[11px] mt-2 text-slate-400">.env의 KAKAO_JAVASCRIPT_KEY와 카카오 Developers의 Web 플랫폼 도메인 등록을 확인하세요.</p></div>`;
+        return;
+      }
+
+      box.innerHTML = `<div id="routePreviewMap" class="route-map-box"></div><div id="routePreviewLoading" class="absolute top-3 left-3 bg-slate-950/80 border border-slate-700 rounded px-2 py-1 text-[11px] text-slate-300">카카오 경로 조회 중...</div>`;
+
+      const mapEl = document.getElementById("routePreviewMap");
+      routePreviewMap = new kakao.maps.Map(mapEl, {
+        center: new kakao.maps.LatLng(Number(ambulanceLat || DEFAULT_AMBULANCE_LAT), Number(ambulanceLng || DEFAULT_AMBULANCE_LNG)),
+        level: 5,
+      });
+
+      clearKakaoObjects(routePreviewLine, routePreviewMarkers);
+      routePreviewLine = null;
+      routePreviewMarkers = [];
+
+      try {
+        const route = await requestRouteForHospital(hospital);
+        drawRouteOnMap(routePreviewMap, route, hospital, "preview");
+
+        const summary = route.summary || {};
+        const etaMin = summary.duration != null ? Math.max(1, Math.round(Number(summary.duration) / 60)) : null;
+        const distanceKm = summary.distance != null ? (Number(summary.distance) / 1000).toFixed(2) : null;
+
+        if (etaMin !== null) hospital.eta_min = etaMin;
+        if (distanceKm !== null) hospital.distance_km = Number(distanceKm);
+
+        const loading = document.getElementById("routePreviewLoading");
+        if (loading) {
+          loading.textContent = `실제 도로 경로 ${distanceKm || "-"}km · 예상 ${etaMin || "-"}분`;
+          loading.className = "absolute top-3 left-3 bg-emerald-950/80 border border-emerald-700 rounded px-2 py-1 text-[11px] text-emerald-300";
+        }
+
+        document.getElementById("targetEta").textContent = etaMin !== null ? `${etaMin}분 (카카오 경로)` : document.getElementById("targetEta").textContent;
+        document.getElementById("targetDistance").textContent = distanceKm !== null ? `${distanceKm}km (카카오 경로)` : document.getElementById("targetDistance").textContent;
+      } catch (error) {
+        console.error(error);
+        const loading = document.getElementById("routePreviewLoading");
+        if (loading) {
+          loading.textContent = `경로 조회 실패: ${error.message}`;
+          loading.className = "absolute top-3 left-3 bg-rose-950/80 border border-rose-700 rounded px-2 py-1 text-[11px] text-rose-300 max-w-[90%]";
+        }
+      }
+    }
+
+    async function generateRandomPatientLocationInSaver() {
+      const btn = document.getElementById("btnRandomPatientLocation");
+      if (btn) {
+        btn.disabled = true;
+        btn.classList.add("opacity-60", "cursor-not-allowed");
+        btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i><span>위치 생성 중...</span>`;
+      }
+
+      try {
+        const response = await fetch("/api/random-patient-location", { method: "POST" });
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.error || "환자 위치 랜덤 생성 실패");
+
+        const loc = result.patient_location;
+        setAmbulanceLocation(loc.lat, loc.lng, `랜덤 환자 위치 생성됨 · 기준 병원: ${loc.anchor_hospital_name}`);
+
+        const jsonOutput = document.getElementById("jsonOutput");
+        if (jsonOutput) {
+          jsonOutput.textContent = JSON.stringify({
+            status: "patient_location_generated",
+            message: "SAVER 내부에서 환자 위치를 랜덤 생성했습니다. 이 위치 기준으로 병원 추천을 다시 실행할 수 있습니다.",
+            patient_location: loc,
+          }, null, 2);
+        }
+
+        if (selectedHospital) renderRoutePreview(selectedHospital);
+      } catch (error) {
+        console.error(error);
+        alert("환자 위치 랜덤 생성 중 오류 발생: " + error.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.classList.remove("opacity-60", "cursor-not-allowed");
+          btn.innerHTML = `<i class="fa-solid fa-location-crosshairs"></i><span class="button-label-two-line"><span>환자 위치</span><span>랜덤 생성</span></span>`;
+        }
+      }
+    }
+
+    function getPatientText() {
+      const el = document.getElementById("patientInputText");
+      return el && el.value ? el.value.trim() : "";
+    }
+
+    function setStatusBadge(status, mode = "ready") {
+      const badge = document.getElementById("nlpStatusBadge");
+      if (!badge) return;
+      badge.textContent = status;
+      if (mode === "success") badge.className = "text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded";
+      else if (mode === "error") badge.className = "text-[10px] bg-rose-500/20 text-rose-400 px-2 py-0.5 rounded";
+      else if (mode === "loading") badge.className = "text-[10px] bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded";
+      else badge.className = "text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded";
+    }
+
+    function setButtonLoading(isLoading) {
+      const button = document.getElementById("btnParsePatient");
+      if (!button) return;
+      if (isLoading) {
+        button.disabled = true;
+        button.classList.add("opacity-60", "cursor-not-allowed");
+        button.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i><span>분석 중...</span>`;
+      } else {
+        button.disabled = false;
+        button.classList.remove("opacity-60", "cursor-not-allowed");
+        button.innerHTML = `<i class="fa-solid fa-microchip"></i><span class="button-label-two-line"><span>AI 분석</span><span>병원 필터링</span></span>`;
+      }
+    }
+
+    function loadScenario(num) {
+      const input = document.getElementById("patientInputText");
+      if (!input) return;
+      const scenarios = {
+        1: "62세 남성, 갑작스러운 흉통과 식은땀이 있으며 심전도에서 ST 상승이 의심됩니다. 급성 심근경색 가능성이 있어 심혈관 중재와 중환자실 치료가 필요할 수 있습니다.",
+        2: "70세 남성, 갑자기 말이 어눌해지고 오른쪽 팔과 다리에 힘이 빠졌습니다. 뇌졸중 또는 뇌출혈이 의심되며 CT와 MRI 검사가 필요합니다.",
+        3: "45세 남성, 교통사고 후 의식이 저하되어 있고 복부 통증과 다리 골절이 의심됩니다. 다발성 외상으로 CT 검사, 수술실, 중환자실이 필요할 수 있습니다.",
+        4: "임신 34주 산모, 심한 두통과 경련 증상이 있으며 혈압이 매우 높습니다. 전자간증 또는 임신중독증이 의심되고 산부인과 응급 수술과 중환자 치료가 필요할 수 있습니다.",
+        5: "5세 남아, 고열과 구토, 설사가 지속되고 소변량이 줄었습니다. 중증 탈수가 의심되며 소아 응급 진료와 수액 치료가 필요합니다."
+      };
+      input.value = scenarios[num] || "";
+    }
+
+    async function processPatientNLP() {
+      const text = getPatientText();
+      if (!text) {
+        alert("환자 상태를 입력해 주세요.");
+        return;
+      }
+
+      setStatusBadge("분석 중", "loading");
+      setButtonLoading(true);
+      const jsonOutput = document.getElementById("jsonOutput");
+      jsonOutput.textContent = JSON.stringify({ status: "running", message: "환자 상태 분석 및 병원 DB 비교 중" }, null, 2);
+
+      try {
+        const response = await fetch("/api/recommend-hospitals", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text,
+            model: selectedModel,
+            ambulance_lat: ambulanceLat,
+            ambulance_lng: ambulanceLng
+          })
+        });
+
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || "병원 추천 API 처리 실패");
+
+        latestBackendResults = result.all_results || [];
+        currentFilterMode = "all";
+        latestPatient = result.patient || null;
+        selectedHospital = null;
+
+        updateSummaryBox(result);
+        updateAppliedModelBadge(result.applied_model);
+        updatePerformanceMetrics(result);
+        renderHospitalTableFromBackend(latestBackendResults);
+        updateFilterButtons();
+        setStatusBadge("분석 완료", "success");
+      } catch (error) {
+        console.error(error);
+        setStatusBadge("오류 발생", "error");
+        jsonOutput.textContent = JSON.stringify({ status: "error", message: error.message }, null, 2);
+        alert("환자 분석 및 병원 추천 중 오류 발생: " + error.message);
+      } finally {
+        setButtonLoading(false);
+      }
+    }
+
+    function updateSummaryBox(result) {
+      const patient = result.patient || {};
+      const visualBox = document.getElementById("parsedVisualBox");
+      visualBox.classList.remove("hidden");
+      document.getElementById("visCategory").textContent = safeValue(patient.suspected_category, "기타");
+      document.getElementById("visKtas").textContent = patient.ktas ? `KTAS ${patient.ktas}등급` : "-";
+      document.getElementById("visGolden").textContent = patient.golden_time_min ? `${patient.golden_time_min}분 이내` : "-";
+      document.getElementById("visAcceptCount").textContent = `${result.display_hospital_count || 0}개`;
+
+      const reqs = [
+        ...(patient.specialists || []),
+        ...(patient.equipment || []),
+        patient.req_icu ? "ICU 필요" : null,
+        patient.req_or ? "수술실 필요" : null,
+        patient.req_er_bed ? "응급실 병상 필요" : null,
+        patient.req_severe_acceptance ? "중증 수용 확인" : null
+      ].filter(Boolean);
+
+      document.getElementById("visReqs").innerHTML = reqs.map(item => `<span class="bg-slate-800 text-emerald-300 px-2 py-0.5 rounded border border-slate-700">${escapeHtml(item)}</span>`).join("");
+
+      document.getElementById("jsonOutput").textContent = JSON.stringify({
+        patient: patient,
+        source_file: result.source_file,
+        total_hospital_count: result.total_hospital_count,
+        display_hospital_count: result.display_hospital_count,
+        acceptable_count: result.acceptable_count,
+        rejected_count: result.rejected_count
+      }, null, 2);
+
+      const countBadge = document.getElementById("filteredCountBadge");
+      countBadge.textContent = `상위 ${result.display_hospital_count || 0}개 표시 / 전체 ${result.total_hospital_count || 0}개 계산`;
+      countBadge.className = "bg-emerald-500/20 text-emerald-400 text-xs px-2 py-0.5 rounded-full border border-emerald-500/30";
+    }
+
+    function updateAppliedModelBadge(appliedModel) {
+      const badge = document.getElementById("appliedModelBadge");
+      if (!badge) return;
+      if (!appliedModel) {
+        badge.textContent = "모델 미적용";
+        return;
+      }
+      badge.textContent = `적용 모델: ${appliedModel.name} (${appliedModel.label})`;
+      badge.className = "bg-indigo-500/20 text-indigo-300 text-xs px-2 py-0.5 rounded-full border border-indigo-500/30";
+    }
+
+    function updatePerformanceMetrics(result) {
+      const metrics = result.performance_metrics || {};
+      const badge = document.getElementById("perfModelBadge");
+      if (badge) {
+        badge.textContent = result.applied_model ? `${result.applied_model.name} 적용 결과` : "분석 완료";
+        badge.className = "text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/30";
+      }
+
+      const fmtPct = (v) => (v === null || v === undefined ? "-" : `${v}%`);
+      const fmtMin = (v) => (v === null || v === undefined ? "-" : `${v}분`);
+      const fmtMs = (v) => (v === null || v === undefined ? "-" : `${v}ms`);
+
+      document.getElementById("perfAcceptRate").textContent = fmtPct(metrics.acceptance_success_rate_pct);
+      document.getElementById("perfGoldenRate").textContent = fmtPct(metrics.golden_time_compliance_rate_pct);
+      document.getElementById("perfAvgEta").textContent = fmtMin(metrics.avg_eta_min);
+      document.getElementById("perfP95Eta").textContent = fmtMin(metrics.p95_eta_min);
+      document.getElementById("perfCongestion").textContent = fmtPct(metrics.hospital_congestion_pct);
+      document.getElementById("perfCompTime").textContent = fmtMs(metrics.computation_time_ms);
+
+      const excludedList = document.getElementById("perfExcludedList");
+      if (excludedList) {
+        excludedList.innerHTML = (metrics.excluded_metrics || [])
+          .map((item) => `<li><span class="text-slate-300">${escapeHtml(item.name)}</span>: ${escapeHtml(item.reason)}</li>`)
+          .join("");
+      }
+    }
+
+    function resetPerformanceMetrics() {
+      ["perfAcceptRate", "perfGoldenRate", "perfAvgEta", "perfP95Eta", "perfCongestion", "perfCompTime"].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = "-";
+      });
+      const badge = document.getElementById("perfModelBadge");
+      if (badge) {
+        badge.textContent = "분석 전";
+        badge.className = "text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700";
+      }
+      const excludedList = document.getElementById("perfExcludedList");
+      if (excludedList) excludedList.innerHTML = "";
+      const modelBadge = document.getElementById("appliedModelBadge");
+      if (modelBadge) {
+        modelBadge.textContent = "모델 미적용";
+        modelBadge.className = "bg-slate-800 text-indigo-300 text-xs px-2 py-0.5 rounded-full border border-slate-700";
+      }
+    }
+
+    function setTableFilter(mode) {
+      currentFilterMode = mode;
+      updateFilterButtons();
+      renderHospitalTableFromBackend(latestBackendResults);
+    }
+
+    function updateFilterButtons() {
+      const buttons = [
+        { el: document.getElementById("btnFilterAll"), mode: "all" },
+        { el: document.getElementById("btnFilterPass"), mode: "pass" },
+        { el: document.getElementById("btnFilterFail"), mode: "fail" }
+      ];
+      buttons.forEach(item => {
+        if (!item.el) return;
+        item.el.className = currentFilterMode === item.mode
+          ? "px-2.5 py-1 rounded bg-slate-800 text-white font-medium"
+          : "px-2.5 py-1 rounded text-slate-400 hover:text-white";
+      });
+    }
+
+    function getFilteredHospitals(hospitals) {
+      if (currentFilterMode === "pass") return hospitals.filter(h => Boolean(h.accept_possible));
+      if (currentFilterMode === "fail") return hospitals.filter(h => !Boolean(h.accept_possible));
+      return hospitals;
+    }
+
+    function makeReasonDetails(reasonText, reasonClass) {
+      const text = reasonText || "-";
+      const preview = text.length > 50 ? text.slice(0, 50) + "..." : text;
+      return `
+        <details class="group">
+          <summary class="cursor-pointer ${reasonClass} hover:underline">${escapeHtml(preview)}</summary>
+          <div class="mt-2 whitespace-normal leading-relaxed text-slate-300 bg-slate-950/70 border border-slate-800 rounded p-2 max-w-[420px]">${escapeHtml(text)}</div>
+        </details>
+      `;
+    }
+
+    function renderHospitalTableFromBackend(hospitals) {
+      const tbody = document.getElementById("hospitalTableBody");
+      const filteredHospitals = getFilteredHospitals(hospitals || []);
+      tbody.innerHTML = "";
+
+      if (!filteredHospitals.length) {
+        tbody.innerHTML = `<tr><td colspan="11" class="p-6 text-center text-slate-500">표시할 병원 결과가 없습니다.</td></tr>`;
+        return;
+      }
+
+      filteredHospitals.forEach((h, idx) => {
+        const tr = document.createElement("tr");
+        tr.className = "border-b border-slate-700/50 hover:bg-slate-800/50 transition cursor-pointer align-top";
+        tr.onclick = () => selectHospitalCardFromBackend(h);
+
+        const isAvailable = Boolean(h.accept_possible);
+        const score = Math.min(Number(h.acceptance_score || 0), 100);
+        const hospitalName = h.hospital_display_name || h.target_hospital || h.dutyname || h.dutyName || h.hpid || "병원명 미확인";
+        const erBeds = safeValue(h.hvec, "-");
+        const orRooms = safeValue(h.hvoc, "-");
+        const icuText = Array.isArray(h.checked_icu_columns) && h.checked_icu_columns.length ? h.checked_icu_columns.join(", ") : "hvicc";
+
+        const availableEquipList = [];
+        if (h.hvctayn === "Y") availableEquipList.push("CT");
+        if (h.hvmriayn === "Y") availableEquipList.push("MRI");
+        if (h.hvangioayn === "Y") availableEquipList.push("혈관조영");
+        if (h.hvventiayn === "Y") availableEquipList.push("인공호흡기");
+        if (h.equipment_static_supported_text) availableEquipList.push(`HIRA 보유: ${h.equipment_static_supported_text}`);
+
+        const specialistText = h.required_specialists_missing_text
+          ? `부족: ${h.required_specialists_missing_text}`
+          : h.required_specialists_passed_text
+            ? `충족: ${h.required_specialists_passed_text}`
+            : h.required_specialists_unknown_text
+              ? `확인필요: ${h.required_specialists_unknown_text}`
+              : safeValue(h.required_specialists_text, "-");
+
+        const specialistClass = h.required_specialists_missing_text ? "text-rose-300" : h.required_specialists_unknown_text ? "text-amber-300" : "text-emerald-300";
+
+        const reasonText = h.failed_reasons_text || h.unknown_reasons_text || h.passed_reasons_text || "-";
+        const reasonClass = h.failed_reasons_text ? "text-rose-300" : h.unknown_reasons_text ? "text-amber-300" : "text-slate-300";
+
+        const statusBadge = isAvailable
+          ? `<span class="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">${escapeHtml(h.acceptance_status || "수용 가능")}</span>`
+          : `<span class="px-2 py-0.5 rounded text-xs bg-rose-500/20 text-rose-400 border border-rose-500/30">${escapeHtml(h.acceptance_status || "수용 불가")}</span>`;
+
+        const etaText = (h.eta_min !== null && h.eta_min !== undefined) ? `${h.eta_min}분` : "정보없음";
+        const distanceText = (h.distance_km !== null && h.distance_km !== undefined) ? `${h.distance_km}km` : "정보없음";
+
+        tr.innerHTML = `
+          <td class="py-3 px-2 text-sm font-bold text-slate-200">${idx + 1}. ${escapeHtml(hospitalName)}</td>
+          <td class="py-3 px-2 text-center text-sm text-emerald-400 font-bold">${escapeHtml(score)}점</td>
+          <td class="py-3 px-2 text-center text-sm font-semibold ${Number(erBeds) > 0 ? "text-emerald-400" : "text-rose-400"}">${escapeHtml(erBeds)}석</td>
+          <td class="py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(icuText)}</td>
+          <td class="py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(orRooms)}실</td>
+          <td class="py-3 px-2 text-center text-xs text-slate-400 max-w-[160px] whitespace-normal">${escapeHtml(availableEquipList.join(", ") || "-")}</td>
+          <td class="py-3 px-2 text-[11px] ${specialistClass} max-w-[180px] whitespace-normal">${escapeHtml(specialistText)}<br><span class="text-slate-500">${escapeHtml(h.required_specialist_count_text || "")}</span></td>
+          <td class="py-3 px-2 text-center text-xs text-blue-300 font-semibold">${escapeHtml(etaText)}</td>
+          <td class="py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(distanceText)}</td>
+          <td class="py-3 px-2 text-center">${statusBadge}</td>
+          <td class="py-3 px-2 text-[11px] max-w-[420px]">${makeReasonDetails(reasonText, reasonClass)}</td>
+        `;
+
+        tbody.appendChild(tr);
+      });
+
+      const topHospital = filteredHospitals.find(h => Boolean(h.accept_possible)) || filteredHospitals[0];
+      if (topHospital) selectHospitalCardFromBackend(topHospital);
+    }
+
+    function selectHospitalCardFromBackend(hospital) {
+      selectedHospital = hospital;
+
+      const hospitalName = hospital.hospital_display_name || hospital.target_hospital || hospital.dutyname || hospital.dutyName || hospital.hpid || "병원명 미확인";
+      document.getElementById("targetHospName").textContent = `${hospitalName} (응급의료센터)`;
+      document.getElementById("selectedHospitalRouteBadge").textContent = `${hospitalName} / ${hospital.acceptance_status || "판정 완료"}`;
+
+      const availability = document.getElementById("targetAvailability");
+      availability.textContent = hospital.acceptance_status || "-";
+      availability.className = hospital.accept_possible ? "font-bold text-emerald-400" : "font-bold text-rose-400";
+
+      document.getElementById("targetScore").textContent = `${Math.min(Number(hospital.acceptance_score || 0), 100)}점`;
+      document.getElementById("targetSpecialistCount").textContent = hospital.required_specialist_count_text || `${hospital.required_specialist_count_total || 0}명`;
+      document.getElementById("targetEta").textContent = (hospital.eta_min !== null && hospital.eta_min !== undefined) ? `${hospital.eta_min}분 (시뮬레이션)` : "정보 없음";
+      document.getElementById("targetDistance").textContent = (hospital.distance_km !== null && hospital.distance_km !== undefined) ? `${hospital.distance_km}km (도로거리 근사)` : "정보 없음";
+
+      const reasonText = hospital.failed_reasons_text || hospital.unknown_reasons_text || hospital.passed_reasons_text || "판정 사유가 없습니다.";
+      document.getElementById("targetReason").textContent = reasonText;
+      latestSelectedRouteData = null;
+
+      renderRoutePreview(hospital);
+    }
+
+    function stopExecution() {
+      latestBackendResults = [];
+      currentFilterMode = "all";
+      latestPatient = null;
+      selectedHospital = null;
+      document.getElementById("patientInputText").value = "";
+      document.getElementById("jsonOutput").textContent = JSON.stringify({ status: "stopped", message: "수행이 멈췄습니다. 환자 입력과 분석 결과를 초기화했습니다." }, null, 2);
+      document.getElementById("hospitalTableBody").innerHTML = `<tr><td colspan="11" class="p-6 text-center text-slate-500">수행이 멈췄습니다. 다시 환자 상태를 입력하고 실행하세요.</td></tr>`;
+      document.getElementById("parsedVisualBox").classList.add("hidden");
+      document.getElementById("filteredCountBadge").textContent = "수행 정지";
+      document.getElementById("filteredCountBadge").className = "bg-slate-800 text-slate-400 text-xs px-2 py-0.5 rounded-full border border-slate-700";
+      document.getElementById("targetHospName").textContent = "아직 선택된 병원이 없습니다.";
+      document.getElementById("targetAvailability").textContent = "-";
+      document.getElementById("targetScore").textContent = "-";
+      document.getElementById("targetSpecialistCount").textContent = "-";
+      document.getElementById("targetEta").textContent = "시뮬레이션";
+      document.getElementById("targetDistance").textContent = "-";
+      document.getElementById("targetReason").textContent = "병원을 선택하면 판정 사유가 표시됩니다.";
+      document.getElementById("selectedHospitalRouteBadge").textContent = "선택 병원 없음";
+      const routeBox = document.getElementById("routeDisplayContainer");
+      if (routeBox) {
+        routeBox.innerHTML = `<div class="text-center text-slate-500 px-4"><i class="fa-solid fa-route text-2xl mb-2 block"></i><p class="text-xs text-slate-500 max-w-md">병원을 선택하면 이 영역에 환자 위치에서 해당 병원까지의 카카오 경로가 표시됩니다.</p></div>`;
+      }
+      resetPerformanceMetrics();
+      setStatusBadge("수행 정지", "ready");
+      updateFilterButtons();
+    }
+
+    async function dispatchAmbulance() {
+      if (!selectedHospital) {
+        alert("먼저 병원 순위 목록에서 이송할 병원을 선택해 주세요.");
+        return;
+      }
+      if (!latestPatient) {
+        alert("먼저 환자 상태를 분석해 주세요.");
+        return;
+      }
+
+      const btn = document.getElementById("btnDispatch");
+      if (btn) {
+        btn.disabled = true;
+        btn.classList.add("opacity-60", "cursor-not-allowed");
+      }
+
+      try {
+        const response = await fetch("/api/dispatch-to-hospital", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            hospital: selectedHospital,
+            patient: latestPatient,
+            applied_model: selectedModel
+          })
+        });
+
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || "환자 정보 전송 실패");
+
+        alert(result.message || "선택한 병원에 환자 정보를 전송했습니다.");
+
+        // 실제 GPS + 카카오디벨로퍼 내비게이션 경로안내 연동은 추후 별도 파일로 연결 예정.
+        startRouteGuidance(selectedHospital);
+      } catch (error) {
+        console.error(error);
+        alert("환자 정보 전송 중 오류 발생: " + error.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.classList.remove("opacity-60", "cursor-not-allowed");
+        }
+      }
+    }
+
+
+    function formatDistanceFromMeters(meters) {
+      const value = Number(meters);
+      if (!Number.isFinite(value)) return "-";
+      if (value >= 1000) return `${(value / 1000).toFixed(1)} km`;
+      return `${Math.max(1, Math.round(value))} m`;
+    }
+
+    function pickNavigationGuide(route) {
+      const fallback = { distance: 120, name: "경로를 따라 이동", icon: "fa-arrow-up" };
+      if (!route || !Array.isArray(route.sections)) return fallback;
+
+      for (const section of route.sections) {
+        if (!Array.isArray(section.guides)) continue;
+        for (const guide of section.guides) {
+          const distance = Number(guide.distance ?? guide.duration ?? 120);
+          const name = guide.name || guide.road_name || guide.guidance || guide.type || "경로를 따라 이동";
+          const typeText = String(guide.type || guide.guidance || name || "");
+          let icon = "fa-arrow-up";
+          if (typeText.includes("좌") || typeText.toLowerCase().includes("left")) icon = "fa-arrow-turn-up";
+          if (typeText.includes("우") || typeText.toLowerCase().includes("right")) icon = "fa-arrow-turn-up";
+          if (typeText.includes("유턴") || typeText.toLowerCase().includes("uturn")) icon = "fa-rotate-left";
+          if (typeText.includes("도착") || typeText.toLowerCase().includes("destination")) icon = "fa-location-dot";
+          return { distance: Number.isFinite(distance) ? distance : 120, name, icon };
+        }
+      }
+
+      if (Array.isArray(route.sections) && route.sections.length) {
+        const firstRoad = route.sections[0]?.roads?.[0];
+        if (firstRoad && firstRoad.name) {
+          return { distance: firstRoad.distance || 120, name: firstRoad.name, icon: "fa-arrow-up" };
+        }
+      }
+
+      return fallback;
+    }
+
+    function setNavigationGuide(route, hospital) {
+      const guide = pickNavigationGuide(route);
+      const hospitalName = hospital?.hospital_display_name || hospital?.target_hospital || hospital?.dutyname || hospital?.dutyName || "선택 병원";
+
+      const nextDistanceEl = document.getElementById("navigationNextDistance");
+      const roadNameEl = document.getElementById("navigationRoadName");
+      const iconEl = document.getElementById("navigationTurnIcon");
+
+      if (nextDistanceEl) nextDistanceEl.textContent = formatDistanceFromMeters(guide.distance);
+      if (roadNameEl) roadNameEl.textContent = `${guide.name} 방면 · 목적지 ${hospitalName}`;
+      if (iconEl) iconEl.className = `fa-solid ${guide.icon}`;
+    }
+
+    function stopNavigationSimulation() {
+      if (navigationAnimationTimer) {
+        clearInterval(navigationAnimationTimer);
+        navigationAnimationTimer = null;
+      }
+    }
+
+    function drawRouteNavigationMode(route, hospital) {
+      const mapEl = document.getElementById("navigationRouteMap");
+      if (!mapEl) return;
+
+      navigationRouteMap = new kakao.maps.Map(mapEl, {
+        center: new kakao.maps.LatLng(Number(ambulanceLat || DEFAULT_AMBULANCE_LAT), Number(ambulanceLng || DEFAULT_AMBULANCE_LNG)),
+        level: 5,
+      });
+
+      clearKakaoObjects(navigationRouteLine, navigationMarkers);
+      clearKakaoObjects(navigationProgressLine, []);
+      if (navigationAmbulanceMarker) navigationAmbulanceMarker.setMap(null);
+
+      navigationRouteLine = null;
+      navigationProgressLine = null;
+      navigationAmbulanceMarker = null;
+      navigationMarkers = [];
+
+      const target = getHospitalLatLng(hospital);
+      const originPosition = new kakao.maps.LatLng(Number(ambulanceLat), Number(ambulanceLng));
+      const destPosition = new kakao.maps.LatLng(target.lat, target.lng);
+      const path = extractRoutePath(route);
+      navigationRoutePath = path.length ? path : [originPosition, destPosition];
+
+      navigationRouteLine = new kakao.maps.Polyline({
+        path: navigationRoutePath,
+        strokeWeight: 7,
+        strokeColor: "#2563eb",
+        strokeOpacity: 0.75,
+        strokeStyle: "solid",
+      });
+      navigationRouteLine.setMap(navigationRouteMap);
+
+      navigationProgressLine = new kakao.maps.Polyline({
+        path: [navigationRoutePath[0]],
+        strokeWeight: 8,
+        strokeColor: "#22c55e",
+        strokeOpacity: 0.95,
+        strokeStyle: "solid",
+      });
+      navigationProgressLine.setMap(navigationRouteMap);
+
+      const patientMarker = new kakao.maps.Marker({ map: navigationRouteMap, position: originPosition });
+      const hospitalMarker = new kakao.maps.Marker({ map: navigationRouteMap, position: destPosition });
+      navigationAmbulanceMarker = new kakao.maps.Marker({ map: navigationRouteMap, position: originPosition });
+
+      navigationMarkers = [patientMarker, hospitalMarker];
+
+      const bounds = new kakao.maps.LatLngBounds();
+      navigationRoutePath.forEach((point) => bounds.extend(point));
+      navigationRouteMap.setBounds(bounds);
+
+      setTimeout(() => {
+        if (navigationRouteMap) navigationRouteMap.relayout();
+        if (navigationRouteMap) navigationRouteMap.setBounds(bounds);
+      }, 120);
+    }
+
+    function startNavigationSimulation(route, hospital) {
+      stopNavigationSimulation();
+
+      const summary = route.summary || {};
+      const totalDistance = Number(summary.distance || 0);
+      const totalDuration = Number(summary.duration || 0);
+      const totalSteps = Math.max(20, Math.min(90, navigationRoutePath.length || 40));
+      navigationAnimationIndex = 0;
+
+      const bottomStatus = document.getElementById("navigationBottomStatus");
+      const bottomSub = document.getElementById("navigationBottomSub");
+      const speedEl = document.getElementById("navigationSpeed");
+      const etaEl = document.getElementById("navigationEta");
+      const distanceEl = document.getElementById("navigationDistance");
+
+      if (bottomStatus) bottomStatus.textContent = "이송 경로 안내 시작";
+      if (bottomSub) bottomSub.textContent = "환자 위치에서 선택 병원까지의 경로만 표시합니다.";
+      if (speedEl) speedEl.textContent = "0";
+
+      navigationAnimationTimer = setInterval(() => {
+        if (!navigationRoutePath.length || !navigationAmbulanceMarker) {
+          stopNavigationSimulation();
+          return;
+        }
+
+        navigationAnimationIndex += 1;
+        const progress = Math.min(1, navigationAnimationIndex / totalSteps);
+        const pathIndex = Math.min(
+          navigationRoutePath.length - 1,
+          Math.floor(progress * (navigationRoutePath.length - 1))
+        );
+
+        const currentPosition = navigationRoutePath[pathIndex];
+        navigationAmbulanceMarker.setPosition(currentPosition);
+
+        if (navigationProgressLine) {
+          navigationProgressLine.setPath(navigationRoutePath.slice(0, pathIndex + 1));
+        }
+
+        const remainDistance = totalDistance ? totalDistance * (1 - progress) : null;
+        const remainDuration = totalDuration ? totalDuration * (1 - progress) : null;
+        const speed = Math.round(22 + 18 * Math.sin(progress * Math.PI));
+
+        if (speedEl) speedEl.textContent = progress >= 1 ? "0" : String(Math.max(12, speed));
+        if (etaEl) etaEl.textContent = remainDuration !== null ? `${Math.max(1, Math.round(remainDuration / 60))}분` : etaEl.textContent;
+        if (distanceEl) distanceEl.textContent = remainDistance !== null ? formatDistanceFromMeters(remainDistance) : distanceEl.textContent;
+
+        if (progress >= 1) {
+          stopNavigationSimulation();
+          if (bottomStatus) bottomStatus.textContent = "목적지 인근 도착";
+          if (bottomSub) bottomSub.textContent = "병원 도착 전 실제 수용 여부를 최종 확인하세요.";
+          const nextDistanceEl = document.getElementById("navigationNextDistance");
+          const roadNameEl = document.getElementById("navigationRoadName");
+          if (nextDistanceEl) nextDistanceEl.textContent = "도착";
+          if (roadNameEl) roadNameEl.textContent = "선택 병원 인근에 도착했습니다.";
+        }
+      }, 700);
+    }
+
+    async function startRouteGuidance(hospital) {
+      if (!hospital) {
+        alert("선택된 병원이 없습니다.");
+        return;
+      }
+
+      if (!(await ensureKakaoMapLoaded())) {
+        alert("카카오맵 SDK를 불러오지 못했습니다. .env의 KAKAO_JAVASCRIPT_KEY와 카카오 Developers의 Web 플랫폼 도메인 등록을 확인하세요.");
+        return;
+      }
+
+      const target = getHospitalLatLng(hospital);
+      if (!target) {
+        alert("선택 병원의 좌표가 없어 경로 안내를 시작할 수 없습니다.");
+        return;
+      }
+      if (ambulanceLat === null || ambulanceLng === null) {
+        alert("환자 위치가 없습니다. GPS 확인 또는 환자 위치 랜덤 생성을 먼저 해주세요.");
+        return;
+      }
+
+      const hospitalName = hospital.hospital_display_name || hospital.target_hospital || hospital.dutyname || hospital.dutyName || hospital.hpid || "선택 병원";
+
+      const mapTeamHospital = {
+        ...hospital,
+        name: hospitalName,
+        lat: Number(target.lat),
+        lng: Number(target.lng),
+        address: hospital.address || hospital.dutyAddr || hospital.dutyaddr || "",
+        type: hospital.hospital_type || "응급의료기관"
+      };
+
+      if (typeof window.startNavigation !== "function") {
+        alert("지도팀 네비게이션 모듈을 찾을 수 없습니다. js/trafficSimulation.js 파일이 포함되어 있는지 확인하세요.");
+        return;
+      }
+
+      await window.startNavigation(mapTeamHospital);
+
+      if (!navigationHistoryPushed) {
+        window.history.pushState({ saverNavigationMode: true }, "", "#navigation");
+        navigationHistoryPushed = true;
+      }
+    }
+
+    function closeRouteGuidance() {
+      stopNavigationSimulation();
+      const screen = document.getElementById("routeNavigationScreen");
+      if (screen) screen.classList.remove("active");
+    }
+
+    function returnToSaverFromNavigation(options = {}) {
+      const fromPopstate = Boolean(options.fromPopstate);
+
+      if (typeof window.exitNavigation === "function") {
+        window.exitNavigation();
+      }
+
+      closeRouteGuidance();
+      document.body.classList.remove("navigation-mode");
+
+      if (!fromPopstate && navigationHistoryPushed) {
+        navigationHistoryPushed = false;
+        const cleanUrl = window.location.pathname + window.location.search;
+        window.history.replaceState({ saverNavigationMode: false }, "", cleanUrl);
+      }
+    }
+
+    window.addEventListener("DOMContentLoaded", () => {
+      updateFilterButtons();
+      updateModelSelectionUI();
+      initAmbulanceLocation();
+      resetPerformanceMetrics();
+      const closeNavigation = document.getElementById("btnCloseNavigation");
+      if (closeNavigation) closeNavigation.addEventListener("click", () => returnToSaverFromNavigation());
+
+      const mapTeamExitNavigation = document.getElementById("navigation-exit");
+      if (mapTeamExitNavigation) {
+        mapTeamExitNavigation.addEventListener("click", () => returnToSaverFromNavigation());
+      }
+
+      const mapTeamRecenterNavigation = document.getElementById("navigation-recenter");
+      if (mapTeamRecenterNavigation && typeof window.recenterNavigationMap === "function") {
+        mapTeamRecenterNavigation.addEventListener("click", () => window.recenterNavigationMap());
+      }
+
+      window.addEventListener("popstate", () => {
+        if (document.body.classList.contains("navigation-mode")) {
+          navigationHistoryPushed = false;
+          returnToSaverFromNavigation({ fromPopstate: true });
+        }
+      });
+
+      const recenterNavigation = document.getElementById("btnRecenterNavigation");
+      if (recenterNavigation) {
+        recenterNavigation.addEventListener("click", () => {
+          if (selectedHospital && navigationRouteMap && latestSelectedRouteData) {
+            stopNavigationSimulation();
+            drawRouteNavigationMode(latestSelectedRouteData, selectedHospital);
+            setNavigationGuide(latestSelectedRouteData, selectedHospital);
+            startNavigationSimulation(latestSelectedRouteData, selectedHospital);
+          }
+        });
+      }
+    });
+  </script>
+        <!-- ================================================= -->
+        <!-- 네비게이션 화면 -->
+        <!-- ================================================= -->
+
+        <section
+            id="navigation-screen"
+            class="navigation-screen"
+        >
+
+
+            <!-- ================================================= -->
+            <!-- 상단 방향 안내 -->
+            <!-- ================================================= -->
+
+            <div class="navigation-top">
+
+
+                <!-- 방향 아이콘 -->
+
+                <div
+                    id="navigation-direction-icon"
+                    class="navigation-direction-icon"
+                >
+                    ↱
+                </div>
+
+
+                <!-- 거리 + 도로명 -->
+
+                <div class="navigation-instruction">
+
+                    <div
+                        id="navigation-distance"
+                        class="navigation-distance"
+                    >
+                        0m
+                    </div>
+
+
+                    <div
+                        id="navigation-road-name"
+                        class="navigation-road-name"
+                    >
+                        경로를 확인하는 중
+                    </div>
+
+                </div>
+
+
+                <!-- 음성 안내 -->
+
+                <button
+                    type="button"
+                    class="navigation-mic"
+                    aria-label="음성 안내"
+                >
+                    🎙
+                </button>
+
+            </div>
+
+
+            <!-- ================================================= -->
+            <!-- 현재 속도
+            <!-- ================================================= -->
+
+            <div class="navigation-speed">
+
+                <div class="speed-title">
+                    신호,속도
+                </div>
+
+
+                <div
+                    id="current-speed"
+                    class="speed-value"
+                >
+                    0
+                </div>
+
+
+                <div class="speed-unit">
+                    km/h
+                </div>
+
+            </div>
+
+            <aside class="traffic-simulation-panel">
+
+                <div class="traffic-panel-header">
+                    <strong>카카오 실시간 교통</strong>
+                    <span id="traffic-refresh-time">갱신 준비</span>
+                </div>
+
+                <div class="traffic-panel-grid">
+                    <div>
+                        <span>현재 교통</span>
+                        <strong id="traffic-state">정보 확인 중</strong>
+                    </div>
+                    <div>
+                        <span>도로 목표속도</span>
+                        <strong id="traffic-target-speed">0 km/h</strong>
+                    </div>
+                </div>
+
+                <div
+                    id="traffic-sign"
+                    class="traffic-sign"
+                >
+                    🪧 다음 도로 안내를 확인하는 중
+                </div>
+
+                <p class="traffic-data-note">
+                    교통속도·정체·ETA는 카카오 경로 데이터 기준이며, 실제 신호 주기는 제공되지 않습니다.
+                </p>
+
+            </aside>
+
+
+            <!-- ================================================= -->
+            <!-- 네비게이션 지도
+            <!-- ================================================= -->
+
+            <div
+                id="navigation-map"
+                class="navigation-map"
+            >
+            </div>
+
+
+            <!-- ================================================= -->
+            <!-- 다음 방향 안내
+            <!-- ================================================= -->
+
+            <div class="navigation-next-guide">
+
+
+                <!-- 다음 안내까지 거리 -->
+
+                <span
+                    id="next-guide-distance"
+                    class="next-guide-distance"
+                >
+                    0m
+                </span>
+
+
+                <!-- 차선 / 방향 -->
+
+                <div class="lane-guide">
+
+                    <span>
+                        ↰
+                    </span>
+
+
+                    <span class="lane-straight">
+                        ↑
+                    </span>
+
+
+                    <span>
+                        ↱
+                    </span>
+
+                </div>
+
+            </div>
+
+
+            <!-- ================================================= -->
+            <!-- 하단 정보 -->
+            <!-- ================================================= -->
+
+            <div class="navigation-bottom">
+
+
+                <!-- 현재 위치로 이동 -->
+
+                <button
+                    type="button"
+                    id="navigation-recenter"
+                    class="navigation-bottom-button"
+                    aria-label="현재 위치"
+                >
+                    ↻
+                </button>
+
+
+                <!-- 도착 / 남은 거리 -->
+
+                <div class="navigation-bottom-info">
+
+
+                    <!-- 도착 예정 -->
+
+                    <div class="navigation-arrival">
+
+                        <span>
+                            도착 예정
+                        </span>
+
+
+                        <strong
+                            id="navigation-arrival-time"
+                        >
+                            --:--
+                        </strong>
+
+                    </div>
+
+
+                    <!-- 남은 거리 -->
+
+                    <div class="navigation-remaining">
+
+                        <span>
+                            남은 거리
+                        </span>
+
+
+                        <strong
+                            id="navigation-remaining-distance"
+                        >
+                            -- km
+                        </strong>
+
+                    </div>
+
+                </div>
+
+
+                <!-- 네비게이션 종료 -->
+
+                <button
+                    type="button"
+                    id="navigation-exit"
+                    class="navigation-bottom-button navigation-exit"
+                    aria-label="네비게이션 종료"
+                >
+                    돌아가기
+                </button>
+
+            </div>
+
+        </section>
+
+
+
+
+  <script>
+    // 지도팀 trafficSimulation.js가 환자 위치를 읽을 수 있도록 SAVER의 현재 환자 좌표를 연결한다.
+    window.getPatientLocation = function () {
+      if (ambulanceLat === null || ambulanceLng === null) return null;
+      return {
+        lat: Number(ambulanceLat),
+        lng: Number(ambulanceLng)
+      };
+    };
+  </script>
+  <script src="/js/trafficSimulation.js"></script>
+
+</body>
+</html>

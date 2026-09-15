@@ -1,0 +1,12 @@
+streamlit
+streamlit-autorefresh
+pandas
+numpy
+openpyxl
+requests
+python-dotenv
+flask
+flask-cors
+google-genai
+pydantic
+pulp
