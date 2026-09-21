@@ -11,4 +11,4 @@ pydantic
 pulp
 google-cloud-speech
 flask-sock
-python-dotenv
+#python-dotenv
