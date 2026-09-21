@@ -2,6 +2,7 @@ import os
 import re
 import time
 import math
+import shutil
 import requests
 import pandas as pd
 import xml.etree.ElementTree as ET
@@ -30,12 +31,14 @@ if not HIRA_DETAIL_SERVICE_KEY:
         "예: HIRA_DETAIL_SERVICE_KEY=의료기관별상세정보서비스_API_인증키"
     )
 
+OUTPUT_FILE = "national_hospital_db_departments_hira_updated.xlsx"
+BACKUP_DIR = Path("hira_backups")
+
 INPUT_CANDIDATES = [
+    OUTPUT_FILE,
     "national_hospital_db_realtime_updated.xlsx",
     "national_hospital_master.xlsx",
 ]
-
-OUTPUT_FILE = "national_hospital_db_departments_hira_updated.xlsx"
 
 # 0이면 전체 병원 업데이트, 5면 앞 5개만 테스트
 DEPARTMENT_UPDATE_LIMIT = int(os.getenv("DEPARTMENT_UPDATE_LIMIT", "5"))
@@ -156,9 +159,9 @@ def load_input_dataframe():
     df = pd.read_excel(input_file, sheet_name=sheet_name)
     df = df.drop(columns=[col for col in df.columns if str(col).startswith("Unnamed")], errors="ignore")
 
-    # 예전 specialist_count_* 컬럼 제거 후 새로 생성한다.
-    old_specialist_cols = [col for col in df.columns if str(col).startswith("specialist_count_")]
-    df = df.drop(columns=old_specialist_cols + OLD_CORE_SPECIALIST_COLUMNS + DROP_FROM_FINAL_DB, errors="ignore")
+    # 기존 HIRA 최종본을 다시 수집할 때는 이미 수집된 과별 전문의 수를 보존한다.
+    # 각 병원의 전문의 API가 정상 응답한 경우에만 해당 행의 값을 새 결과로 갱신한다.
+    df = df.drop(columns=OLD_CORE_SPECIALIST_COLUMNS + DROP_FROM_FINAL_DB, errors="ignore")
 
     for col in BASE_EXTRA_COLUMNS + BOOL_TEXT_COLUMNS:
         if col not in df.columns:
@@ -166,6 +169,21 @@ def load_input_dataframe():
         df[col] = df[col].astype("object").fillna("")
 
     return df, input_file, sheet_name
+
+
+def backup_existing_output():
+    output_path = Path(OUTPUT_FILE)
+
+    if not output_path.exists():
+        return None
+
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = BACKUP_DIR / f"national_hospital_db_departments_hira_updated_{timestamp}.xlsx"
+    shutil.copy2(output_path, backup_path)
+
+    print(f"기존 HIRA 최종본 백업 완료: {backup_path}")
+    return backup_path
 
 
 # =========================================================
@@ -434,6 +452,16 @@ def select_update_targets(df):
     return target_indices
 
 
+def clear_specialist_counts_for_row(df, idx):
+    dynamic_cols = [
+        col for col in df.columns
+        if re.match(r"^specialist_count_\d+_", str(col))
+    ]
+
+    for col in dynamic_cols:
+        df.at[idx, col] = pd.NA
+
+
 def update_one_hospital(df, idx, specialist_long_rows):
     row = df.loc[idx]
     hospital_name = get_hospital_name(row)
@@ -447,16 +475,22 @@ def update_one_hospital(df, idx, specialist_long_rows):
     try:
         dept_result = call_api("departments", ykiho)
         departments = extract_department_names(dept_result["df"])
-        flags = build_department_flags(departments)
 
-        df.at[idx, "departments"] = ", ".join(departments)
         df.at[idx, "departments_last_checked_at"] = now
-        df.at[idx, "departments_error"] = ""
 
-        for col, value in flags.items():
-            df.at[idx, col] = value
+        if departments:
+            flags = build_department_flags(departments)
 
-        print(f"    진료과목정보 성공: {len(departments)}개")
+            df.at[idx, "departments"] = ", ".join(departments)
+            df.at[idx, "departments_error"] = ""
+
+            for col, value in flags.items():
+                df.at[idx, col] = value
+
+            print(f"    진료과목정보 성공: {len(departments)}개")
+        else:
+            df.at[idx, "departments_error"] = "빈 응답 - 기존 값 보존"
+            print("    진료과목정보 빈 응답: 기존 값 보존")
     except Exception as e:
         df.at[idx, "departments_last_checked_at"] = now
         df.at[idx, "departments_error"] = str(e)
@@ -469,28 +503,36 @@ def update_one_hospital(df, idx, specialist_long_rows):
         spc_result = call_api("specialist_count", ykiho)
         dynamic_counts, long_rows = extract_all_specialist_counts(spc_result["df"])
 
-        for col, value in dynamic_counts.items():
-            if col not in df.columns:
-                df[col] = pd.NA
-            df.at[idx, col] = value
+        if dynamic_counts:
+            # 정상 응답한 병원만 기존 과별 전문의 수를 새 결과로 교체한다.
+            # 빈 응답/오류일 때는 기존 정상값을 지우지 않는다.
+            clear_specialist_counts_for_row(df, idx)
 
-        for long_row in long_rows:
-            specialist_long_rows.append(
-                {
-                    "hospital_name": hospital_name,
-                    "address": address,
-                    "encrypted_ykiho": ykiho,
-                    "dgsbjtCd": long_row.get("dgsbjtCd", ""),
-                    "dgsbjtCdNm": long_row.get("dgsbjtCdNm", ""),
-                    "dtlSdrCnt": long_row.get("dtlSdrCnt", ""),
-                    "dynamic_column": long_row.get("dynamic_column", ""),
-                    "source_url": spc_result["source_url"],
-                    "fetched_at": now,
-                }
-            )
+            for col, value in dynamic_counts.items():
+                if col not in df.columns:
+                    df[col] = pd.NA
+                df.at[idx, col] = value
 
-        df.at[idx, "specialist_count_error"] = ""
-        print(f"    전문의 수 성공: {len(dynamic_counts)}개 과")
+            for long_row in long_rows:
+                specialist_long_rows.append(
+                    {
+                        "hospital_name": hospital_name,
+                        "address": address,
+                        "encrypted_ykiho": ykiho,
+                        "dgsbjtCd": long_row.get("dgsbjtCd", ""),
+                        "dgsbjtCdNm": long_row.get("dgsbjtCdNm", ""),
+                        "dtlSdrCnt": long_row.get("dtlSdrCnt", ""),
+                        "dynamic_column": long_row.get("dynamic_column", ""),
+                        "source_url": spc_result["source_url"],
+                        "fetched_at": now,
+                    }
+                )
+
+            df.at[idx, "specialist_count_error"] = ""
+            print(f"    전문의 수 성공: {len(dynamic_counts)}개 과")
+        else:
+            df.at[idx, "specialist_count_error"] = "빈 응답 - 기존 값 보존"
+            print("    전문의 수 빈 응답: 기존 값 보존")
     except Exception as e:
         df.at[idx, "specialist_count_error"] = str(e)
         print(f"    전문의 수 실패: {e}")
@@ -501,9 +543,14 @@ def update_one_hospital(df, idx, specialist_long_rows):
     try:
         special_result = call_api("special_diag", ykiho)
         summary = extract_simple_summary(special_result["df"])
-        df.at[idx, "special_diag_summary"] = summary
-        df.at[idx, "special_diag_error"] = ""
-        print("    특수진료정보 성공")
+
+        if summary:
+            df.at[idx, "special_diag_summary"] = summary
+            df.at[idx, "special_diag_error"] = ""
+            print("    특수진료정보 성공")
+        else:
+            df.at[idx, "special_diag_error"] = "빈 응답 - 기존 값 보존"
+            print("    특수진료정보 빈 응답: 기존 값 보존")
     except Exception as e:
         df.at[idx, "special_diag_error"] = str(e)
         print(f"    특수진료정보 실패: {e}")
@@ -514,9 +561,14 @@ def update_one_hospital(df, idx, specialist_long_rows):
     try:
         equip_result = call_api("equipment", ykiho)
         summary = extract_simple_summary(equip_result["df"])
-        df.at[idx, "medical_equipment_summary"] = summary
-        df.at[idx, "medical_equipment_error"] = ""
-        print("    의료장비정보 성공")
+
+        if summary:
+            df.at[idx, "medical_equipment_summary"] = summary
+            df.at[idx, "medical_equipment_error"] = ""
+            print("    의료장비정보 성공")
+        else:
+            df.at[idx, "medical_equipment_error"] = "빈 응답 - 기존 값 보존"
+            print("    의료장비정보 빈 응답: 기존 값 보존")
     except Exception as e:
         df.at[idx, "medical_equipment_error"] = str(e)
         print(f"    의료장비정보 실패: {e}")
@@ -627,6 +679,7 @@ def main():
     print("HIRA 상세정보 API 기반 병원 정보 보완 시작")
     print("==============================================")
 
+    backup_existing_output()
     df, input_file, sheet_name = load_input_dataframe()
     target_indices = select_update_targets(df)
     specialist_long_rows = []
