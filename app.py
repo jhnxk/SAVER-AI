@@ -1,11 +1,15 @@
 import os
 import sys
+import json
 import subprocess
+import time
 from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
+import requests
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 
 # =========================================================
@@ -31,7 +35,8 @@ SAVER_DB_FILE = "saver_current_hospital_db.xlsx"
 NATIONAL_UPDATE_SCRIPT = "update_realtime_resources_national.py"
 DEPARTMENT_UPDATE_SCRIPT = "update_departments_hira_api.py"
 
-RECOMMENDATION_SYSTEM_URL = os.getenv("RECOMMENDATION_SYSTEM_URL", "http://127.0.0.1:5050")
+RECOMMENDATION_SYSTEM_URL = "http://127.0.0.1:5050"
+SAVER_SYNC_URL = f"{RECOMMENDATION_SYSTEM_URL}/api/sync-hospitals"
 
 # 화면/저장 파일에서 숨길 컬럼
 # 원본 API 매칭 검증용 컬럼이지만, 시연 화면에서는 수용 점수와 혼동될 수 있어서 제외
@@ -55,6 +60,17 @@ default_states = {
     "script_stdout": "",
     "script_stderr": "",
     "excel_saved": False,
+    "saver_synced": False,
+    "saver_sync_count": 0,
+    # 앱 세션 최초 1회 NEMC 실시간 갱신 여부
+    "initial_realtime_refresh_attempted": False,
+    "initial_realtime_refresh_success": False,
+    # 주기 자동 갱신 설정
+    "auto_refresh_enabled": True,
+    "auto_refresh_interval_minutes": 10,
+    "auto_refresh_component_count": 0,
+    "last_realtime_attempt_epoch": None,
+    "last_realtime_refresh_epoch": None,
 }
 
 for key, value in default_states.items():
@@ -127,12 +143,135 @@ def load_hospital_db(excel_file):
     return df, sheet_name
 
 
+
+# 실시간 API 파일에서 현재값으로 갱신할 컬럼만 지정한다.
+# HIRA 상세정보(departments, specialist_count_*, special_diag_summary,
+# medical_equipment_summary)는 이 목록에 넣지 않아 기존 최종 DB 값을 그대로 보존한다.
+REALTIME_UPDATE_COLUMNS = [
+    "hpid",
+    "realtime_match_status",
+    "api_matched_name",
+    "hvidate",
+    "hvec",
+    "hvoc",
+    "hvgc",
+    "hvicc",
+    "hvncc",
+    "hvcc",
+    "hvccc",
+    "hv2",
+    "hv3",
+    "hv4",
+    "hv5",
+    "hv6",
+    "hvctayn",
+    "hvmriayn",
+    "hvangioayn",
+    "hvventiayn",
+    "data_fetched_at",
+]
+
+
+def merge_realtime_into_hira_db(base_df, realtime_df):
+    """
+    HIRA 상세정보가 들어 있는 기존 최종 DB를 기준으로 두고,
+    NEMC 실시간 API 컬럼만 최신 realtime 파일 값으로 교체한다.
+    """
+    base_df = base_df.copy()
+    realtime_df = realtime_df.copy()
+
+    if "encrypted_ykiho" in base_df.columns and "encrypted_ykiho" in realtime_df.columns:
+        merge_key = "encrypted_ykiho"
+    elif "hospital_name" in base_df.columns and "hospital_name" in realtime_df.columns:
+        merge_key = "hospital_name"
+    else:
+        raise RuntimeError(
+            "HIRA 최종 DB와 실시간 DB를 병합할 키(encrypted_ykiho 또는 hospital_name)가 없습니다."
+        )
+
+    base_df[merge_key] = base_df[merge_key].fillna("").astype(str).str.strip()
+    realtime_df[merge_key] = realtime_df[merge_key].fillna("").astype(str).str.strip()
+
+    if base_df[merge_key].duplicated().any() or realtime_df[merge_key].duplicated().any():
+        raise RuntimeError(f"병합 키 {merge_key}에 중복값이 있어 안전하게 병합할 수 없습니다.")
+
+    base_indexed = base_df.set_index(merge_key, drop=False)
+    realtime_indexed = realtime_df.set_index(merge_key, drop=False)
+    common_keys = base_indexed.index.intersection(realtime_indexed.index)
+
+    for col in REALTIME_UPDATE_COLUMNS:
+        if col not in realtime_indexed.columns:
+            continue
+
+        if col not in base_indexed.columns:
+            base_indexed[col] = None
+
+        base_indexed.loc[common_keys, col] = realtime_indexed.loc[common_keys, col]
+
+    merged_df = base_indexed.reset_index(drop=True)
+    merged_df = format_hvidate(merged_df)
+
+    return merged_df, merge_key, len(common_keys)
+
+
+def sync_current_db_to_saver(df=None):
+    """
+    현재 Streamlit 메모리의 병원 DB를 Excel로 저장하지 않고
+    Flask SAVER의 런타임 메모리 DB로 직접 전달한다.
+    """
+    if df is None:
+        df = st.session_state.hospital_df
+
+    if df is None or len(df) == 0:
+        raise RuntimeError("SAVER로 전달할 병원 데이터가 없습니다.")
+
+    df_to_send = df.copy()
+    df_to_send = remove_hidden_columns(df_to_send)
+    df_to_send = format_hvidate(df_to_send)
+
+    # pandas/numpy 타입과 NaN을 안전한 JSON 값으로 변환
+    hospitals = json.loads(
+        df_to_send.to_json(
+            orient="records",
+            force_ascii=False,
+            date_format="iso",
+        )
+    )
+
+    response = requests.post(
+        SAVER_SYNC_URL,
+        json={
+            "hospitals": hospitals,
+            "source": "streamlit_runtime",
+            "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        timeout=30,
+    )
+
+    try:
+        result = response.json()
+    except Exception:
+        raise RuntimeError(
+            f"SAVER 동기화 응답을 읽지 못했습니다. HTTP {response.status_code}"
+        )
+
+    if response.status_code >= 400 or not result.get("success"):
+        raise RuntimeError(result.get("error") or "SAVER 동기화에 실패했습니다.")
+
+    st.session_state.saver_synced = True
+    st.session_state.saver_sync_count = int(result.get("hospital_count", len(df_to_send)))
+    add_log(f"SAVER 메모리 동기화 완료: {st.session_state.saver_sync_count}개 병원")
+
+    return result
+
 def reset_execution_state():
     st.session_state.fetch_error = None
     st.session_state.run_status = "수행 정지"
     st.session_state.script_stdout = ""
     st.session_state.script_stderr = ""
     st.session_state.excel_saved = False
+    st.session_state.saver_synced = False
+    st.session_state.saver_sync_count = 0
     add_log("수행 멈춤: 화면 실행 상태 초기화")
 
 
@@ -161,16 +300,34 @@ def run_script(script_name, env=None):
         )
 
 
-def refresh_realtime_data():
+def refresh_realtime_data(trigger="수동"):
+    """
+    NEMC 전국 실시간 API를 갱신하고,
+    HIRA baseline 위에 실시간 컬럼만 메모리에서 병합한 뒤
+    현재 DataFrame을 SAVER 런타임 DB로 바로 동기화한다.
+
+    반환값:
+        True  - 실시간 갱신 성공
+        False - 실시간 갱신 실패
+    """
     st.session_state.run_status = "전국 실시간 API 갱신 중"
     st.session_state.fetch_error = None
     st.session_state.excel_saved = False
-    add_log("전국 실시간 응급자원 API 데이터 새로고침 시작")
+    st.session_state.saver_synced = False
+    st.session_state.saver_sync_count = 0
+    st.session_state.last_realtime_attempt_epoch = time.time()
+
+    add_log(f"전국 실시간 응급자원 API 데이터 새로고침 시작 ({trigger})")
 
     try:
         if not Path(MASTER_FILE).exists():
             raise FileNotFoundError(
                 f"{MASTER_FILE} 파일이 없습니다. 먼저 build_national_master_db.py를 실행하세요."
+            )
+
+        if not Path(DEFAULT_FILE).exists():
+            raise FileNotFoundError(
+                f"{DEFAULT_FILE} 파일이 없습니다. HIRA 상세정보가 들어 있는 최종 DB가 필요합니다."
             )
 
         run_script(NATIONAL_UPDATE_SCRIPT)
@@ -180,26 +337,52 @@ def refresh_realtime_data():
                 f"{NATIONAL_UPDATE_SCRIPT} 실행 후에도 {REALTIME_FILE} 파일이 생성되지 않았습니다."
             )
 
-        df, sheet_name = load_hospital_db(REALTIME_FILE)
+        # HIRA 상세정보가 들어 있는 최종 DB를 기준으로 유지하고,
+        # 실시간 API 관련 컬럼만 방금 생성된 realtime 파일에서 갱신한다.
+        base_df, base_sheet_name = load_hospital_db(DEFAULT_FILE)
+        realtime_df, realtime_sheet_name = load_hospital_db(REALTIME_FILE)
+
+        df, merge_key, merged_count = merge_realtime_into_hira_db(
+            base_df,
+            realtime_df,
+        )
 
         st.session_state.hospital_df = df
         st.session_state.last_fetch = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.last_realtime_refresh_epoch = time.time()
         st.session_state.run_status = "실시간 갱신 완료"
         st.session_state.excel_saved = False
 
-        add_log(f"실시간 API 갱신 완료: {len(df)}개 병원 / 시트 {sheet_name}")
-        add_log("SAVER 반영을 위해 [엑셀로 저장]을 눌러주세요.")
+        add_log(
+            f"실시간 API 갱신 완료: {len(df)}개 병원 / "
+            f"HIRA 기준 시트 {base_sheet_name} / 실시간 시트 {realtime_sheet_name} / "
+            f"병합키 {merge_key} / {merged_count}개 병원 병합"
+        )
+
+        try:
+            sync_current_db_to_saver(df)
+            add_log("엑셀 저장 없이 현재 DB를 SAVER에 바로 전달했습니다.")
+        except Exception as sync_error:
+            st.session_state.saver_synced = False
+            st.session_state.saver_sync_count = 0
+            add_log(f"SAVER 자동 동기화 실패: {sync_error}")
+
+        return True
 
     except Exception as e:
         st.session_state.fetch_error = str(e)
         st.session_state.run_status = "오류 발생"
+        st.session_state.saver_synced = False
+        st.session_state.saver_sync_count = 0
         add_log(f"실시간 API 갱신 오류: {e}")
-
+        return False
 
 def refresh_department_data():
     st.session_state.run_status = "HIRA 상세정보 갱신 중"
     st.session_state.fetch_error = None
     st.session_state.excel_saved = False
+    st.session_state.saver_synced = False
+    st.session_state.saver_sync_count = 0
     add_log("HIRA 진료과/전문의/특수진료/의료장비 갱신 시작")
 
     try:
@@ -218,19 +401,40 @@ def refresh_department_data():
 
         df, sheet_name = load_hospital_db(DEFAULT_FILE)
 
+        # HIRA 상세정보 갱신 뒤에도 최신 실시간 파일이 있으면
+        # 실시간 컬럼만 메모리에서 다시 병합한다.
+        if Path(REALTIME_FILE).exists():
+            realtime_df, _ = load_hospital_db(REALTIME_FILE)
+            df, merge_key, merged_count = merge_realtime_into_hira_db(
+                df,
+                realtime_df,
+            )
+            add_log(
+                f"HIRA 갱신본에 실시간 컬럼 병합 완료: "
+                f"병합키 {merge_key} / {merged_count}개 병원"
+            )
+
         st.session_state.hospital_df = df
         st.session_state.last_fetch = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         st.session_state.run_status = "HIRA 상세정보 갱신 완료"
         st.session_state.excel_saved = False
 
         add_log(f"HIRA 상세정보 갱신 완료: {len(df)}개 병원 / 시트 {sheet_name}")
-        add_log("SAVER 반영을 위해 [엑셀로 저장]을 눌러주세요.")
+
+        try:
+            sync_current_db_to_saver(df)
+            add_log("엑셀 저장 없이 HIRA 갱신 DB를 SAVER에 바로 전달했습니다.")
+        except Exception as sync_error:
+            st.session_state.saver_synced = False
+            st.session_state.saver_sync_count = 0
+            add_log(f"SAVER 자동 동기화 실패: {sync_error}")
 
     except Exception as e:
         st.session_state.fetch_error = str(e)
         st.session_state.run_status = "오류 발생"
+        st.session_state.saver_synced = False
+        st.session_state.saver_sync_count = 0
         add_log(f"HIRA 상세정보 갱신 오류: {e}")
-
 
 def load_current_file_to_session(db_file):
     try:
@@ -238,8 +442,10 @@ def load_current_file_to_session(db_file):
         st.session_state.hospital_df = df
         st.session_state.fetch_error = None
         st.session_state.excel_saved = False
+        st.session_state.saver_synced = False
+        st.session_state.saver_sync_count = 0
         add_log(f"파일 로드 완료: {db_file} / 시트 {sheet_name} / {len(df)}개 병원")
-        add_log("SAVER 반영을 위해 [엑셀로 저장]을 눌러주세요.")
+        add_log("SAVER 반영을 위해 [SAVER 동기화]를 눌러주세요.")
 
     except Exception as e:
         st.session_state.fetch_error = str(e)
@@ -248,66 +454,17 @@ def load_current_file_to_session(db_file):
 
 
 def save_current_db_for_app_and_saver():
+    """
+    기존 함수명은 유지하되 더 이상 Excel 파일을 덮어쓰지 않는다.
+    현재 Streamlit 메모리 DB를 SAVER 런타임 메모리로 직접 전달한다.
+    """
     if st.session_state.hospital_df is None:
-        st.warning("저장할 데이터가 없습니다.")
-        add_log("엑셀 저장 실패: 데이터 없음")
+        st.warning("SAVER로 전달할 데이터가 없습니다.")
+        add_log("SAVER 동기화 실패: 데이터 없음")
         return
 
-    output_name = DEFAULT_FILE
-    saver_output_name = SAVER_DB_FILE
-
-    df_to_save = st.session_state.hospital_df.copy()
-    df_to_save = remove_hidden_columns(df_to_save)
-    df_to_save = format_hvidate(df_to_save)
-
-    with pd.ExcelWriter(output_name, engine="openpyxl") as writer:
-        df_to_save.to_excel(
-            writer,
-            index=False,
-            sheet_name="national_hospital_db",
-        )
-
-        meta = pd.DataFrame(
-            [
-                {
-                    "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "source": "Streamlit app.py",
-                    "note": "전국 상급종합병원/종합병원 최종 DB 저장",
-                    "hidden_columns": ", ".join(HIDDEN_COLUMNS),
-                }
-            ]
-        )
-        meta.to_excel(writer, index=False, sheet_name="save_meta")
-
-    with pd.ExcelWriter(saver_output_name, engine="openpyxl") as writer:
-        df_to_save.to_excel(
-            writer,
-            index=False,
-            sheet_name="national_hospital_db",
-        )
-
-        meta = pd.DataFrame(
-            [
-                {
-                    "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "source": "Streamlit app.py",
-                    "note": "SAVER 추천 시스템이 읽는 최신 병원 DB",
-                    "base_file": output_name,
-                    "hidden_columns": ", ".join(HIDDEN_COLUMNS),
-                }
-            ]
-        )
-        meta.to_excel(writer, index=False, sheet_name="saver_meta")
-
-    st.session_state.excel_saved = True
-    st.session_state.run_status = "엑셀 저장 완료"
-    st.session_state.last_fetch = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    add_log(f"최종 DB 저장 완료: {output_name}")
-    add_log(f"SAVER 최신 DB 저장 완료: {saver_output_name}")
-
-    st.toast("최신 DB 저장 완료. SAVER에서 바로 사용할 수 있습니다.", icon="✅")
-
+    sync_current_db_to_saver(st.session_state.hospital_df)
+    st.toast("현재 DB를 SAVER에 바로 전달했습니다.", icon="✅")
 
 def build_summary(df):
     total_count = len(df)
@@ -370,6 +527,64 @@ def build_summary(df):
     )
 
 
+def ensure_initial_realtime_refresh():
+    """
+    Streamlit 세션 최초 1회만 NEMC 실시간 API를 자동 갱신한다.
+
+    실패하더라도 앱을 중단하지 않고, 현재 메모리에 로드된 HIRA baseline을
+    SAVER 런타임 DB에 fallback으로 동기화한다.
+    """
+    if st.session_state.initial_realtime_refresh_attempted:
+        return
+
+    # 실패 시 Streamlit rerun마다 무한 재시도하지 않도록 호출 전에 먼저 표시한다.
+    st.session_state.initial_realtime_refresh_attempted = True
+    add_log("앱 최초 진입: NEMC 실시간 API 자동 갱신을 시작합니다.")
+
+    success = refresh_realtime_data(trigger="앱 최초 자동 갱신")
+    st.session_state.initial_realtime_refresh_success = bool(success)
+
+    if success:
+        add_log("앱 최초 자동 갱신 완료: 최신 실시간 DB가 SAVER에 전달되었습니다.")
+        return
+
+    # 실시간 API가 실패해도 현재 로드된 baseline으로 SAVER 사용은 가능하게 한다.
+    add_log(
+        "앱 최초 실시간 갱신에 실패하여 현재 로드된 HIRA baseline을 "
+        "SAVER fallback DB로 동기화합니다."
+    )
+
+    try:
+        sync_current_db_to_saver(st.session_state.hospital_df)
+        add_log("HIRA baseline fallback SAVER 동기화 완료")
+    except Exception as sync_error:
+        st.session_state.saver_synced = False
+        st.session_state.saver_sync_count = 0
+        add_log(f"HIRA baseline fallback SAVER 동기화 실패: {sync_error}")
+
+
+def handle_periodic_realtime_refresh(auto_refresh_tick):
+    """
+    streamlit-autorefresh의 tick이 증가했을 때만 NEMC 실시간 데이터를 다시 갱신한다.
+    일반적인 필터 조작/버튼 클릭에 따른 Streamlit rerun에서는 API를 재호출하지 않는다.
+    """
+    if not st.session_state.auto_refresh_enabled:
+        return
+
+    last_handled_tick = int(st.session_state.auto_refresh_component_count or 0)
+
+    if auto_refresh_tick <= last_handled_tick:
+        return
+
+    # 갱신 시작 전에 tick을 기록하여 오류가 나도 같은 tick에서 반복 실행되지 않게 한다.
+    st.session_state.auto_refresh_component_count = int(auto_refresh_tick)
+
+    interval = int(st.session_state.auto_refresh_interval_minutes)
+    add_log(f"{interval}분 주기 NEMC 실시간 자동 갱신 실행")
+
+    refresh_realtime_data(trigger=f"{interval}분 주기 자동 갱신")
+
+
 # =========================================================
 # 4. 사이드바
 # =========================================================
@@ -383,6 +598,35 @@ with st.sidebar:
     )
 
     st.caption("기본값은 HIRA 상세정보까지 보완된 최종 DB입니다.")
+
+    st.divider()
+
+    st.subheader("자동 실시간 갱신")
+
+    st.checkbox(
+        "NEMC 실시간 정보 자동 갱신",
+        key="auto_refresh_enabled",
+        help=(
+            "앱 최초 진입 시에는 이 설정과 관계없이 1회 자동 갱신합니다. "
+            "이 옵션은 이후 주기적인 자동 갱신 여부를 설정합니다."
+        ),
+    )
+
+    st.selectbox(
+        "자동 갱신 주기",
+        options=[5, 10, 15, 30],
+        key="auto_refresh_interval_minutes",
+        disabled=not st.session_state.auto_refresh_enabled,
+        format_func=lambda x: f"{x}분",
+    )
+
+    if st.session_state.auto_refresh_enabled:
+        st.caption(
+            f"최초 1회 자동 갱신 후 {st.session_state.auto_refresh_interval_minutes}분마다 "
+            "NEMC 실시간 정보만 다시 갱신하고 SAVER에 자동 동기화합니다."
+        )
+    else:
+        st.caption("주기 자동 갱신은 꺼져 있습니다. 최초 1회 자동 갱신은 수행됩니다.")
 
     st.divider()
 
@@ -410,6 +654,18 @@ with st.sidebar:
         load_current_file_to_session(db_file)
 
 
+# 주기 자동 갱신용 타이머.
+# 이 컴포넌트는 지정한 주기마다 Streamlit을 rerun하지만,
+# 실제 NEMC API 호출은 handle_periodic_realtime_refresh()에서 tick 증가 시에만 수행한다.
+if st.session_state.auto_refresh_enabled:
+    auto_refresh_tick = st_autorefresh(
+        interval=int(st.session_state.auto_refresh_interval_minutes) * 60 * 1000,
+        key="nemc_periodic_auto_refresh",
+    )
+else:
+    auto_refresh_tick = int(st.session_state.auto_refresh_component_count or 0)
+
+
 # =========================================================
 # 5. 초기 파일 로드
 # =========================================================
@@ -434,6 +690,18 @@ if st.session_state.hospital_df is None:
 
 
 # =========================================================
+# 5-1. 앱 최초 자동 실시간 갱신 및 주기 자동 갱신
+# =========================================================
+
+# 최초 진입 시 HIRA baseline을 메모리에 먼저 로드한 뒤,
+# NEMC 실시간 API를 1회 자동 호출 → in-memory merge → SAVER runtime sync까지 수행한다.
+ensure_initial_realtime_refresh()
+
+# 이후에는 위 st_autorefresh tick이 실제로 증가했을 때만 주기 갱신한다.
+handle_periodic_realtime_refresh(auto_refresh_tick)
+
+
+# =========================================================
 # 6. 상단 버튼
 # =========================================================
 
@@ -441,29 +709,32 @@ col1, col2, col3, col4, col5 = st.columns([1.2, 1.2, 1.2, 1, 2.4])
 
 with col1:
     if st.button("실시간 API 새로고침", type="primary", use_container_width=True):
-        refresh_realtime_data()
+        refresh_realtime_data(trigger="수동 버튼")
 
 with col2:
     if st.button("HIRA 상세정보 갱신", use_container_width=True):
         refresh_department_data()
 
 with col3:
-    if st.button("엑셀로 저장", use_container_width=True):
+    if st.button("SAVER 동기화", use_container_width=True):
         try:
             save_current_db_for_app_and_saver()
         except Exception as e:
             st.session_state.fetch_error = str(e)
             st.session_state.run_status = "오류 발생"
-            add_log(f"엑셀 저장 오류: {e}")
+            st.session_state.saver_synced = False
+            st.session_state.saver_sync_count = 0
+            add_log(f"SAVER 동기화 오류: {e}")
 
-    if st.session_state.excel_saved and Path(SAVER_DB_FILE).exists():
-        st.link_button(
-            "🚑 SAVER 실행",
-            url=RECOMMENDATION_SYSTEM_URL,
-            type="primary",
-            use_container_width=True,
-        )
-        st.caption(f"저장 완료: {SAVER_DB_FILE}")
+    st.link_button(
+        "🚑 SAVER 실행",
+        url=RECOMMENDATION_SYSTEM_URL,
+        type="primary",
+        use_container_width=True,
+    )
+
+    if st.session_state.saver_synced:
+        st.caption(f"SAVER 동기화 완료: {st.session_state.saver_sync_count}개 병원")
 
 with col4:
     if st.button("수행 멈춤", use_container_width=True):
@@ -471,9 +742,16 @@ with col4:
 
 with col5:
     if st.session_state.last_fetch:
-        st.info(f"마지막 갱신/로드/저장 시각: {st.session_state.last_fetch}")
+        st.info(f"마지막 실시간 갱신 시각: {st.session_state.last_fetch}")
     else:
         st.info("현재 파일을 기준으로 표시 중입니다.")
+
+    if st.session_state.auto_refresh_enabled:
+        st.caption(
+            f"NEMC 자동 갱신: {st.session_state.auto_refresh_interval_minutes}분 주기"
+        )
+    else:
+        st.caption("NEMC 주기 자동 갱신: 꺼짐")
 
 
 # =========================================================
@@ -742,8 +1020,10 @@ st.divider()
 
 st.subheader("SAVER 추천 시스템 연결")
 
-if st.session_state.excel_saved and Path(SAVER_DB_FILE).exists():
-    st.success(f"최신 DB가 SAVER용 파일로 저장되었습니다: {SAVER_DB_FILE}")
+if st.session_state.saver_synced:
+    st.success(
+        f"현재 DB {st.session_state.saver_sync_count}개 병원이 SAVER 메모리에 동기화되었습니다."
+    )
 
     st.link_button(
         "🚑 SAVER 실행",
@@ -753,12 +1033,13 @@ if st.session_state.excel_saved and Path(SAVER_DB_FILE).exists():
     )
 
     st.caption(
-        "이 버튼으로 이동하면 SAVER-AI는 saver_current_hospital_db.xlsx를 최우선으로 읽습니다."
+        "이 버튼으로 이동하면 SAVER-AI는 Excel 저장본보다 현재 동기화된 메모리 DB를 우선 사용합니다."
     )
 
 else:
     st.warning(
-        "SAVER로 이동하기 전에 먼저 [엑셀로 저장]을 눌러 최신 병원 DB를 저장하세요."
+        "현재 DB가 SAVER에 아직 동기화되지 않았습니다. "
+        "[SAVER 동기화]를 누르면 Excel 파일을 덮어쓰지 않고 바로 전달됩니다."
     )
 
     st.link_button(
