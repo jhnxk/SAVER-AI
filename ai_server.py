@@ -16,11 +16,11 @@ if google_json_str:
 
 import os
 
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 
 # .env를 Google/gRPC 라이브러리 import 전에 읽어 DNS resolver 설정이
 # 실시간 STT 채널 생성에도 확실히 적용되도록 한다.
-load_dotenv()
+#load_dotenv()
 os.environ.setdefault("GRPC_DNS_RESOLVER", "native")
 
 import math
