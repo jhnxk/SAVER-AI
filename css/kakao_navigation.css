@@ -844,54 +844,17 @@ body.navigation-mode .navigation-screen {
     }
 
 
+    /* 모바일에서는 '카카오 실시간 교통' 패널 전체를 숨깁니다 */
     .traffic-simulation-panel {
-
-        top: 92px;
-
-        right: 12px;
-
-        width: calc(100vw - 24px);
-
-        padding: 10px;
-
-        border-radius: 12px;
+        display: none !important;
     }
 
-
-    .traffic-panel-header {
-
-        margin-bottom: 6px;
-    }
-
-
-    .traffic-panel-header strong {
-
-        font-size: 12px;
-    }
-
-
-    /* 모바일에서는 현재교통/도로목표속도 보드를 표시하지 않는다 */
-    .traffic-panel-grid {
-
-        display: none;
-    }
-
-
-    .traffic-sign {
-
-        margin-top: 0;
-
-        padding: 8px 10px;
-
-        font-size: 11px;
-    }
-
-
-    /* 모바일에서는 카카오 경로 데이터 출처 안내 문구를 표시하지 않는다 */
-    .traffic-data-note {
-
-        display: none;
-    }
+    /* 위 패널 전체를 숨겼으므로, 아래 하위 요소들의 CSS 수정은 삭제하거나 주석 처리해도 됩니다. */
+    /*
+    .traffic-panel-header { ... }
+    .traffic-panel-grid { display: none; }
+    .traffic-sign { ... }
+    .traffic-data-note { display: none; }
 
 
     /* 모바일에서는 시뮬레이션 배속 조절 UI를 표시하지 않는다 (trafficSimulation.js가 동적으로 생성) */
