@@ -10,3 +10,5 @@ flask-cors
 google-genai
 pydantic
 pulp
+google-cloud-speech
+flask-sock
