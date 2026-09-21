@@ -14,13 +14,12 @@ if google_json_str:
     temp_key_file.close()
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_key_file.name
 
-import os
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv #깃허브에선 지움
 
 # .env를 Google/gRPC 라이브러리 import 전에 읽어 DNS resolver 설정이
 # 실시간 STT 채널 생성에도 확실히 적용되도록 한다.
-load_dotenv()
+load_dotenv() #깃허브에선 지움
 os.environ.setdefault("GRPC_DNS_RESOLVER", "native")
 
 import math
@@ -4872,11 +4871,5 @@ def index():
 
 
 if __name__ == "__main__":
-    app.run(
-        host="127.0.0.1",
-        port=5050,
-        debug=True
-    )
-
-import os
-app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 5050))
+    app.run(host="0.0.0.0", port=port, debug=False)
