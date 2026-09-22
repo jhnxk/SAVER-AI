@@ -110,7 +110,7 @@ body.navigation-mode .navigation-screen {
 
     right: 0;
 
-    height: 155px;
+    height: 140px;
 
     background: #1976d2;
 
@@ -120,7 +120,7 @@ body.navigation-mode .navigation-screen {
 
     align-items: center;
 
-    padding: 20px 30px;
+    padding: 15px 30px;
 
     z-index: 20;
 
@@ -181,40 +181,6 @@ body.navigation-mode .navigation-screen {
     overflow: hidden;
 
     text-overflow: ellipsis;
-}
-
-
-/* =========================================================
-   음성 버튼
-========================================================= */
-
-.navigation-mic {
-
-    width: 65px;
-
-    height: 65px;
-
-    min-width: 65px;
-
-    border: none;
-
-    border-radius: 50%;
-
-    background: white;
-
-    color: #1976d2;
-
-    font-size: 28px;
-
-    cursor: pointer;
-
-    box-shadow:
-        0 2px 6px rgba(
-            0,
-            0,
-            0,
-            0.2
-        );
 }
 
 
@@ -690,9 +656,11 @@ body.navigation-mode .navigation-screen {
 }
 
 
-.navigation-exit {
-
-    border-left: 1px solid #ddd;
+.navigation-bottom-button.navigation-exit {
+    width: auto;
+    padding: 0 20px;
+    font-size: 18px;
+    font-weight: bold;
 }
 
 
@@ -802,13 +770,6 @@ body.navigation-mode .navigation-screen {
     .navigation-road-name {
 
         font-size: 13px;
-    }
-
-
-    /* 모바일에서는 음성 안내 버튼을 사용하지 않는다 */
-    .navigation-mic {
-
-        display: none;
     }
 
 
