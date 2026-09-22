@@ -300,12 +300,83 @@
         <div class="overflow-x-auto rounded-lg border border-slate-800">
           <table class="min-w-full text-left text-xs text-slate-300">
             <thead class="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
-              <tr>
-                <th class="p-2.5 whitespace-nowrap min-w-[280px]">순위 / 병원명</th>
-                <th class="p-2.5 text-center whitespace-nowrap w-48">필수 장비</th>
-                <th class="p-2.5 whitespace-nowrap">주요 사유</th>
-              </tr>
-            </thead>
+  <tr>
+    <!-- ==================== MOBILE: 3 COLUMNS ==================== -->
+
+    <!-- 순위 / 병원명 -->
+    <th class="md:hidden p-2.5 whitespace-nowrap min-w-[280px]">
+      순위 / 병원명
+    </th>
+
+    <!-- 필수 장비 -->
+    <th class="md:hidden p-2.5 text-center whitespace-nowrap">
+      필수 장비
+    </th>
+
+    <!-- 주요 사유 -->
+    <th class="md:hidden p-2.5 whitespace-nowrap">
+      주요 사유
+    </th>
+
+
+    <!-- ==================== PC: 11 COLUMNS ==================== -->
+
+    <!-- 1. 순위 / 병원명 -->
+    <th class="hidden md:table-cell p-2.5 whitespace-nowrap min-w-[280px]">
+      순위 / 병원명
+    </th>
+
+    <!-- 2. 수용 점수 -->
+    <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap">
+      수용 점수
+    </th>
+
+    <!-- 3. 응급실 병상 -->
+    <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap">
+      응급실 병상
+    </th>
+
+    <!-- 4. ICU 판단 -->
+    <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap">
+      ICU 판단
+    </th>
+
+    <!-- 5. 수술실 -->
+    <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap">
+      수술실
+    </th>
+
+    <!-- 6. 필수 장비 -->
+    <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap">
+      필수 장비
+    </th>
+
+    <!-- 7. 필수 진료과 -->
+    <th class="hidden md:table-cell p-2.5 whitespace-nowrap">
+      필수 진료과
+    </th>
+
+    <!-- 8. 예상 이송시간 -->
+    <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap">
+      예상 이송시간
+    </th>
+
+    <!-- 9. 예상 이송거리 -->
+    <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap">
+      예상 이송거리
+    </th>
+
+    <!-- 10. 최종 판정 -->
+    <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap">
+      최종 판정
+    </th>
+
+    <!-- 11. 주요 사유 -->
+    <th class="hidden md:table-cell p-2.5 whitespace-nowrap">
+      주요 사유
+    </th>
+  </tr>
+</thead>
             <tbody id="hospitalTableBody" class="divide-y divide-slate-800/60 bg-slate-900/50">
               <tr><td colspan="11" class="p-6 text-center text-slate-500">아직 분석 결과가 없습니다. 왼쪽에서 환자 상태를 입력하고 실행하세요.</td></tr>
             </tbody>
@@ -1078,16 +1149,155 @@
         `;
 
         tr.innerHTML = `
-          <td class="py-3 px-2 align-top w-1/2 min-w-[280px]">
-            ${hospitalSummaryHtml}
-          </td>
-          <td class="py-3 px-2 text-center text-xs text-slate-400 max-w-[160px] align-middle">
-            ${escapeHtml(availableEquipList.join(", ") || "-")}
-          </td>
-          <td class="py-3 px-2 text-[11px] max-w-[420px] align-middle">
-            ${makeReasonDetails(reasonText, reasonClass)}
-          </td>
-        `;
+
+  <!-- =========================================================
+       MOBILE: 3 COLUMNS
+       기존 server.ai(2).html의 모바일 표시 형태 유지
+       ========================================================= -->
+
+  <!-- ① 모바일: 순위 / 병원명 + 주요 정보 -->
+  <td class="md:hidden py-3 px-2 align-top min-w-[280px]">
+    <div class="font-bold text-slate-200 text-sm">
+      ${idx + 1}. ${escapeHtml(hospitalName)}
+    </div>
+
+    <!-- 수용 점수 -->
+    <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+      <span class="text-emerald-400 font-semibold">
+        수용 점수: ${escapeHtml(score)}점
+      </span>
+
+      <!-- 응급실 병상 -->
+      <span class="${Number(erBeds) > 0 ? "text-emerald-400" : "text-rose-400"}">
+        응급실 병상: ${escapeHtml(erBeds)}석
+      </span>
+    </div>
+
+    <!-- ICU / 수술실 -->
+    <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+      <span class="text-slate-300">
+        ICU: ${escapeHtml(icuText)}
+      </span>
+
+      <span class="text-slate-300">
+        수술실: ${escapeHtml(orRooms)}실
+      </span>
+    </div>
+
+    <!-- 이송시간 / 거리 -->
+    <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+      <span class="text-blue-300 font-semibold">
+        예상 이송시간: ${escapeHtml(etaText)}
+      </span>
+
+      <span class="text-slate-300">
+        예상 이송거리: ${escapeHtml(distanceText)}
+      </span>
+    </div>
+
+    <!-- 필수 진료과 -->
+    <div class="mt-1 text-[11px] ${specialistClass}">
+      필수 진료과: ${escapeHtml(specialistText)}
+      <span class="text-slate-500">
+        (${escapeHtml(h.required_specialist_count_text || "")})
+      </span>
+    </div>
+
+    <!-- 최종 판정 -->
+    <div class="mt-2">
+      ${statusBadge}
+    </div>
+  </td>
+
+
+  <!-- ② 모바일: 필수 장비 -->
+  <td class="md:hidden py-3 px-2 text-center text-xs text-slate-400 max-w-[160px] align-middle whitespace-normal">
+    ${escapeHtml(availableEquipList.join(", ") || "-")}
+  </td>
+
+
+  <!-- ③ 모바일: 주요 사유 -->
+  <td class="md:hidden py-3 px-2 text-[11px] max-w-[420px] align-middle">
+    ${makeReasonDetails(reasonText, reasonClass)}
+  </td>
+
+
+
+  <!-- =========================================================
+       PC: 11 COLUMNS
+       server.ai(3).html 스타일과 동일한 디자인
+       ========================================================= -->
+
+  <!-- ① 순위 / 병원명 -->
+  <td class="hidden md:table-cell py-3 px-2 text-sm font-bold text-slate-200">
+    ${idx + 1}. ${escapeHtml(hospitalName)}
+  </td>
+
+
+  <!-- ② 수용 점수 -->
+  <td class="hidden md:table-cell py-3 px-2 text-center text-sm text-emerald-400 font-bold">
+    ${escapeHtml(score)}점
+  </td>
+
+
+  <!-- ③ 응급실 병상 -->
+  <td class="hidden md:table-cell py-3 px-2 text-center text-sm font-semibold ${Number(erBeds) > 0 ? "text-emerald-400" : "text-rose-400"}">
+    ${escapeHtml(erBeds)}석
+  </td>
+
+
+  <!-- ④ ICU 판단 -->
+  <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300">
+    ${escapeHtml(icuText)}
+  </td>
+
+
+  <!-- ⑤ 수술실 -->
+  <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300">
+    ${escapeHtml(orRooms)}실
+  </td>
+
+
+  <!-- ⑥ 필수 장비 -->
+  <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-400 max-w-[160px] whitespace-normal">
+    ${escapeHtml(availableEquipList.join(", ") || "-")}
+  </td>
+
+
+  <!-- ⑦ 필수 진료과 -->
+  <td class="hidden md:table-cell py-3 px-2 text-[11px] ${specialistClass} max-w-[180px] whitespace-normal">
+    ${escapeHtml(specialistText)}
+    <br>
+    <span class="text-slate-500">
+      ${escapeHtml(h.required_specialist_count_text || "")}
+    </span>
+  </td>
+
+
+  <!-- ⑧ 예상 이송시간 -->
+  <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-blue-300 font-semibold">
+    ${escapeHtml(etaText)}
+  </td>
+
+
+  <!-- ⑨ 예상 이송거리 -->
+  <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300">
+    ${escapeHtml(distanceText)}
+  </td>
+
+
+  <!-- ⑩ 최종 판정 -->
+  <td class="hidden md:table-cell py-3 px-2 text-center">
+    ${statusBadge}
+  </td>
+
+
+  <!-- ⑪ 주요 사유 -->
+  <td class="hidden md:table-cell py-3 px-2 text-[11px] max-w-[420px]">
+    ${makeReasonDetails(reasonText, reasonClass)}
+  </td>
+
+`;
 
         tbody.appendChild(tr);
       });
@@ -1542,17 +1752,6 @@
                     </div>
 
                 </div>
-
-
-                <!-- 음성 안내 -->
-
-                <button
-                    type="button"
-                    class="navigation-mic"
-                    aria-label="음성 안내"
-                >
-                    🎙
-                </button>
 
             </div>
 
