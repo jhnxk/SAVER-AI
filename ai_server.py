@@ -65,6 +65,15 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
 
+# 여러 개의 Gemini API 키를 순환 사용하기 위한 설정.
+# .env에 GEMINI_API_KEYS="키1,키2,키3,키4" 처럼 콤마로 구분해서 넣으면 된다.
+# GEMINI_API_KEYS가 없으면 기존 GEMINI_API_KEY 하나만 사용(하위 호환).
+GEMINI_API_KEYS = [
+    key.strip()
+    for key in os.getenv("GEMINI_API_KEYS", "").split(",")
+    if key.strip()
+] or ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+
 # Google Cloud Speech-to-Text V2 설정.
 # GOOGLE_CLOUD_PROJECT가 .env에 없으면 gcloud ADC에서 프로젝트 ID를 자동 탐지한다.
 GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
@@ -198,10 +207,15 @@ def _google_stt_adaptation_phrase_count():
         + len(GOOGLE_STT_DEMOGRAPHIC_PHRASES)
     )
 
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY가 .env에 없습니다.")
+if not GEMINI_API_KEYS:
+    raise ValueError("GEMINI_API_KEY(또는 GEMINI_API_KEYS)가 .env에 없습니다.")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+# 키마다 하나씩 클라이언트를 미리 만들어두고, 쿼터 초과 시 다음 클라이언트로 순환한다.
+_gemini_clients = [genai.Client(api_key=key) for key in GEMINI_API_KEYS]
+_gemini_key_index = 0
+_gemini_key_lock = Lock()
+
+print(f"[GEMINI] {len(_gemini_clients)}개의 API 키를 순환 사용합니다.")
 
 app = Flask(__name__, static_folder=".")
 CORS(app)
@@ -232,6 +246,72 @@ PATIENT_MAX_RADIUS_KM = 5.0
 # 실제 병원 시스템 연동 API가 준비되기 전까지는 이 파일이 "전송 기록"의 역할을 한다.
 DISPATCH_LOG_FILE = "dispatch_log.jsonl"
 
+# 실제 거절/재이송 이력이 쌓이기 전까지 사용하는 보수적 프록시 가정치.
+ASSUMED_REJECTION_RESEARCH_MIN = 20.0
+ASSUMED_RETRANSFER_MIN = 30.0
+MIN_EXPECTED_WAIT_MIN = 5.0
+CONGESTION_WAIT_RANGE_MIN = 25.0
+
+TOPSIS_VARIANTS = {
+    "C0": {
+        "label": "기존형(기준선)",
+        "description": "v8의 원형 TOPSIS. 기존 결과를 비교하기 위한 대조군입니다.",
+        "patient_aware": False,
+        "experimental": False,
+        "criteria": {
+            "acceptance_score": {"benefit": True, "weight": 0.40},
+            "distance_km": {"benefit": False, "weight": 0.30},
+            "required_specialist_count_total": {"benefit": True, "weight": 0.20},
+            "congestion_score": {"benefit": False, "weight": 0.10},
+        },
+    },
+    "C1": {
+        "label": "보수적 개선형",
+        "description": "서로 중복이 적은 ETA, 혼잡도, 전문치료 여유도, 데이터 신뢰도를 고정 가중치로 평가합니다.",
+        "patient_aware": False,
+        "experimental": False,
+        "criteria": {
+            "eta_min": {"benefit": False, "weight": 0.35},
+            "congestion_score": {"benefit": False, "weight": 0.20},
+            "specialty_margin": {"benefit": True, "weight": 0.30},
+            "data_reliability_score": {"benefit": True, "weight": 0.15},
+        },
+    },
+    "C2": {
+        "label": "환자 맞춤형",
+        "description": "C1과 동일한 기준을 사용하되 KTAS/골든타임에 따라 가중치만 변경합니다.",
+        "patient_aware": True,
+        "experimental": False,
+        "criteria_from": "C1",
+        "weight_profiles": {
+            "critical": {
+                "eta_min": 0.40,
+                "congestion_score": 0.15,
+                "specialty_margin": 0.35,
+                "data_reliability_score": 0.10,
+            },
+            "standard": {
+                "eta_min": 0.30,
+                "congestion_score": 0.25,
+                "specialty_margin": 0.20,
+                "data_reliability_score": 0.25,
+            },
+        },
+    },
+    "C3": {
+        "label": "치료지연 프록시 실험형",
+        "description": "예상 치료시작 지연 프록시와 전문치료 여유도만 사용하는 실험안입니다.",
+        "patient_aware": False,
+        "experimental": True,
+        "criteria": {
+            "effective_treatment_delay_min": {"benefit": False, "weight": 0.70},
+            "specialty_margin": {"benefit": True, "weight": 0.30},
+        },
+    },
+}
+
+DEFAULT_TOPSIS_VARIANT = "C1"
+
 MODEL_INFO = {
     "A": {
         "name": "Model A",
@@ -241,12 +321,12 @@ MODEL_INFO = {
     "B": {
         "name": "Model B",
         "label": "MILP 혼합정수선형계획",
-        "description": "수용 가능 병원 각각을 0/1 변수로 두고, 수용점수·이동거리·병원 혼잡도를 반영한 목적함수를 최대화하는 조합을 정수계획법으로 반복 탐색해 순위를 만듭니다.",
+        "description": "예상 치료시작 지연, 임상 적합성, 정보 신뢰도와 골든타임 위반을 반영합니다. 다중 환자 API에서는 병상 용량까지 동시에 최적화합니다.",
     },
     "C": {
         "name": "Model C",
         "label": "TOPSIS 다기준 의사결정",
-        "description": "수용점수, 이동거리, 전문의 수, 병원 혼잡도를 기준으로 이상해(ideal solution)에 가장 가깝고 부정 이상해에서 가장 먼 병원을 TOPSIS 기법으로 찾아 순위를 만듭니다.",
+        "description": "동일한 후보 병원과 공통 TOPSIS 엔진으로 C0/C1/C2/C3 변형을 비교합니다. 기본값은 독립적 기준을 사용하는 C1입니다.",
     },
     "D": {
         "name": "Model D",
@@ -979,15 +1059,70 @@ def _is_gemini_503(error):
     )
 
 
-def _generate_patient_with_model(model_name, prompt):
-    return client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=PatientInfo,
-        ),
+def _is_gemini_quota_exceeded(error):
+    """무료 API 키의 사용량(쿼터)을 다 써서 나는 429/RESOURCE_EXHAUSTED 오류인지 판별한다."""
+    for attr in ("code", "status_code", "status"):
+        value = getattr(error, attr, None)
+        if value == 429 or str(value).strip() == "429":
+            return True
+
+    message = str(error).upper()
+    return (
+        "429" in message
+        or "RESOURCE_EXHAUSTED" in message
+        or "QUOTA" in message
+        or "RATE LIMIT" in message
     )
+
+
+def _current_gemini_key_index():
+    with _gemini_key_lock:
+        return _gemini_key_index
+
+
+def _advance_gemini_key(from_index):
+    """쿼터가 소진된 키를 다음 키로 넘긴다. 다른 요청이 이미 넘겨놨다면 중복으로 넘기지 않는다."""
+    global _gemini_key_index
+    with _gemini_key_lock:
+        if _gemini_key_index == from_index:
+            _gemini_key_index = (_gemini_key_index + 1) % len(_gemini_clients)
+        return _gemini_key_index
+
+
+def _generate_patient_with_model(model_name, prompt):
+    """
+    준비된 Gemini API 키를 순환하며 환자 분석을 요청한다.
+    현재 키가 쿼터 초과(429)면 다음 키로 넘어가서 같은 모델로 재시도하고,
+    모든 키를 다 써봤는데도 실패하면 마지막 오류를 그대로 올린다.
+    """
+    last_error = None
+
+    for _ in range(len(_gemini_clients)):
+        key_index = _current_gemini_key_index()
+        active_client = _gemini_clients[key_index]
+
+        try:
+            return active_client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=PatientInfo,
+                ),
+            )
+        except Exception as error:
+            last_error = error
+            if not _is_gemini_quota_exceeded(error):
+                raise
+
+            print(
+                f"GEMINI QUOTA EXCEEDED: key #{key_index + 1}/{len(_gemini_clients)} "
+                f"소진 -> 다음 키로 전환합니다."
+            )
+            _advance_gemini_key(key_index)
+
+    # 준비된 키를 모두 순환해도 전부 쿼터 초과였던 경우
+    raise last_error
 
 
 def analyze_patient(text: str):
@@ -1618,66 +1753,168 @@ def compute_congestion_score(
     )
 
 
-def attach_routing_fields(
-    hospital_df,
-    ambulance_lat,
-    ambulance_lng
-):
-    """
-    acceptance/rejection 계산이 끝난 결과 DataFrame에
-    거리/ETA/혼잡도 컬럼을 추가한다.
-    """
+def get_patient_priority_profile(patient):
+    """환자 중증도와 골든타임에 따라 모델의 선호도 프로파일을 반환합니다."""
+    ktas = to_number(patient.get("ktas"))
+    golden_time = to_number(patient.get("golden_time_min"))
+    critical = (ktas is not None and ktas <= 2) or (golden_time is not None and golden_time <= 60)
+    profile_name = "critical" if critical else "standard"
 
+    if ktas is not None:
+        severity_weight = {1: 3.0, 2: 2.4, 3: 1.7, 4: 1.2, 5: 1.0}.get(int(ktas), 1.5)
+    else:
+        severity_weight = 1.5
+
+    return {
+        "name": profile_name,
+        "label": "시간 민감/중증" if critical else "표준",
+        "severity_weight": severity_weight,
+        "golden_time_min": golden_time,
+        "topsis_weights": TOPSIS_VARIANTS["C2"]["weight_profiles"][profile_name],
+    }
+
+
+def compute_data_freshness_score(hospital, now=None):
+    """실시간 데이터 최신성 점수를 0~1로 환산합니다."""
+    timestamp = None
+    for col in ["data_fetched_at", "hvidate", "master_last_updated_at", "departments_last_checked_at"]:
+        value = hospital.get(col)
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            continue
+        text = str(value).strip()
+        if not text or text.lower() in ["none", "nan"]:
+            continue
+
+        compact = text.split(".")[0]
+        if compact.isdigit() and len(compact) == 14:
+            parsed = pd.to_datetime(compact, format="%Y%m%d%H%M%S", errors="coerce")
+        else:
+            parsed = pd.to_datetime(text, errors="coerce")
+
+        if not pd.isna(parsed):
+            timestamp = parsed
+            break
+
+    if timestamp is None:
+        return 0.2
+
+    now_ts = pd.Timestamp(now) if now is not None else pd.Timestamp.now()
+    if getattr(timestamp, "tzinfo", None) is not None and now_ts.tzinfo is None:
+        timestamp = timestamp.tz_localize(None)
+    elif getattr(timestamp, "tzinfo", None) is None and now_ts.tzinfo is not None:
+        now_ts = now_ts.tz_localize(None)
+
+    age_min = max(0.0, (now_ts - timestamp).total_seconds() / 60.0)
+    if age_min <= 15: return 1.0
+    if age_min <= 60: return 0.85
+    if age_min <= 180: return 0.65
+    if age_min <= 720: return 0.4
+    if age_min <= 1440: return 0.25
+    return 0.1
+
+
+def compute_operational_estimates(hospital, eta_min, congestion_score, now=None):
+    """대기, 거절, 재이송 지연 및 수용확률 추정치를 계산합니다."""
+    acceptance_score = float(to_number(hospital.get("acceptance_score")) or 0.0)
+    clinical_score = min(1.0, max(0.0, acceptance_score / 100.0))
+    freshness = compute_data_freshness_score(hospital, now=now)
+    realtime_ok = str(hospital.get("realtime_match_status", "")).strip() == "OK"
+
+    unknown_reasons = hospital.get("unknown_reasons") or []
+    if isinstance(unknown_reasons, str):
+        unknown_count = len([item for item in unknown_reasons.split("/") if item.strip()])
+    else:
+        unknown_count = len(unknown_reasons)
+
+    reliability = 0.7 * freshness + 0.3 * (1.0 if realtime_ok else 0.3)
+    reliability = min(1.0, max(0.0, reliability - min(0.3, unknown_count * 0.06)))
+
+    estimated_acceptance_probability = (
+        0.35 + 0.45 * clinical_score + 0.20 * reliability - min(0.25, unknown_count * 0.05)
+    )
+    estimated_acceptance_probability = min(0.98, max(0.05, estimated_acceptance_probability))
+
+    congestion = 0.5 if congestion_score is None else min(1.0, max(0.0, float(congestion_score)))
+    expected_wait = MIN_EXPECTED_WAIT_MIN + CONGESTION_WAIT_RANGE_MIN * congestion
+    rejection_delay = (1.0 - estimated_acceptance_probability) * ASSUMED_REJECTION_RESEARCH_MIN
+    retransfer_delay = (
+        max(0.0, 0.85 - clinical_score) / 0.85 * ASSUMED_RETRANSFER_MIN
+        + (1.0 - reliability) * 5.0
+    )
+
+    effective_delay = None
+    if eta_min is not None:
+        effective_delay = float(eta_min) + expected_wait + rejection_delay + retransfer_delay
+
+    return {
+        "data_freshness_score": round(freshness, 3),
+        "data_reliability_score": round(reliability, 3),
+        "estimated_acceptance_probability": round(estimated_acceptance_probability, 3),
+        "expected_wait_min": round(expected_wait, 1),
+        "expected_rejection_delay_min": round(rejection_delay, 1),
+        "expected_retransfer_delay_min": round(retransfer_delay, 1),
+        "effective_treatment_delay_min": round(effective_delay, 1) if effective_delay is not None else None,
+    }
+
+
+def compute_specialty_margin(hospital, patient):
+    """필수 전문과 충족 후 여유 전문의 수를 계산합니다."""
+    required_specialties = {
+        str(name).strip()
+        for name in (patient or {}).get("specialists", []) or []
+        if str(name).strip()
+    }
+    if not required_specialties:
+        return 0.0, "필수 전문과 요구 없음"
+
+    total_count = to_number(hospital.get("required_specialist_count_total"))
+    if total_count is None or total_count <= 0:
+        return 0.0, "필수 전문과 인원수 미확인"
+
+    minimum_required_count = float(len(required_specialties))
+    margin = max(0.0, float(total_count) - minimum_required_count)
+    return round(margin, 3), f"전문의 {int(total_count)}명 - 필수과 최소 {int(minimum_required_count)}명"
+
+
+def attach_routing_fields(hospital_df, ambulance_lat, ambulance_lng, patient=None, as_of=None):
+    """이동거리/ETA/혼잡도 및 예상 치료시작 지연 정보 필드를 결합합니다."""
     if hospital_df.empty:
         hospital_df["distance_km"] = []
         hospital_df["eta_min"] = []
         hospital_df["congestion_score"] = []
-
+        hospital_df["data_freshness_score"] = []
+        hospital_df["data_reliability_score"] = []
+        hospital_df["estimated_acceptance_probability"] = []
+        hospital_df["expected_wait_min"] = []
+        hospital_df["expected_rejection_delay_min"] = []
+        hospital_df["expected_retransfer_delay_min"] = []
+        hospital_df["effective_treatment_delay_min"] = []
+        hospital_df["specialty_margin"] = []
+        hospital_df["specialty_margin_basis"] = []
         return hospital_df
 
-    distances = []
-    etas = []
-    congestions = []
+    distances, etas, congestions = [], [], []
+    operational_estimates, specialty_margins, specialty_margin_bases = [], [], []
 
     for _, row in hospital_df.iterrows():
-        (
-            distance_km,
-            eta_min,
-        ) = compute_distance_and_eta(
-            row,
-            ambulance_lat,
-            ambulance_lng
-        )
+        distance_km, eta_min = compute_distance_and_eta(row, ambulance_lat, ambulance_lng)
+        congestion_score = compute_congestion_score(row)
+        distances.append(distance_km)
+        etas.append(eta_min)
+        congestions.append(congestion_score)
+        operational_estimates.append(compute_operational_estimates(row, eta_min, congestion_score, now=as_of))
+        specialty_margin, specialty_margin_basis = compute_specialty_margin(row, patient or {})
+        specialty_margins.append(specialty_margin)
+        specialty_margin_bases.append(specialty_margin_basis)
 
-        distances.append(
-            distance_km
-        )
-
-        etas.append(
-            eta_min
-        )
-
-        congestions.append(
-            compute_congestion_score(
-                row
-            )
-        )
-
-    hospital_df = (
-        hospital_df.copy()
-    )
-
-    hospital_df[
-        "distance_km"
-    ] = distances
-
-    hospital_df[
-        "eta_min"
-    ] = etas
-
-    hospital_df[
-        "congestion_score"
-    ] = congestions
+    hospital_df = hospital_df.copy()
+    hospital_df["distance_km"] = distances
+    hospital_df["eta_min"] = etas
+    hospital_df["congestion_score"] = congestions
+    for col in operational_estimates[0]:
+        hospital_df[col] = [estimate[col] for estimate in operational_estimates]
+    hospital_df["specialty_margin"] = specialty_margins
+    hospital_df["specialty_margin_basis"] = specialty_margin_bases
 
     return hospital_df
 
@@ -1794,366 +2031,338 @@ def rank_model_a(
     )
 
 
-def rank_model_b(
-    acceptable_df,
-    weights=None
-):
-    """
-    Model B:
-    MILP 혼합정수선형계획 기반 순위 산정.
-    """
-
+def rank_model_b(acceptable_df, patient=None, weights=None):
+    """Model B: 치료 지연, 데이터 신뢰도 및 골든타임 패널티를 반영한 MILP 순위 산정."""
     if acceptable_df.empty:
         return acceptable_df
 
-    weights = weights or {
-        "score": 0.5,
-        "distance": 0.3,
-        "congestion": 0.2,
-    }
+    patient = patient or {}
+    profile = get_patient_priority_profile(patient)
+    if weights is None:
+        if profile["name"] == "critical":
+            weights = {"delay": 0.45, "score": 0.30, "specialist": 0.15, "reliability": 0.10}
+        else:
+            weights = {"delay": 0.35, "score": 0.30, "specialist": 0.15, "reliability": 0.20}
 
     df = acceptable_df.copy()
-
-    df["_norm_score"] = (
-        _normalize_series(
-            df["acceptance_score"],
-            higher_is_better=True
-        )
+    df["_norm_score"] = _normalize_series(df["acceptance_score"], higher_is_better=True)
+    delay_values = pd.to_numeric(df["effective_treatment_delay_min"], errors="coerce")
+    delay_fill = delay_values.max() + 30 if delay_values.notna().any() else 999.0
+    df["_norm_delay"] = _normalize_series(delay_values.fillna(delay_fill), higher_is_better=False)
+    df["_norm_specialist"] = _normalize_series(
+        pd.to_numeric(df["required_specialist_count_total"], errors="coerce").fillna(0),
+        higher_is_better=True,
     )
+    df["_norm_reliability"] = pd.to_numeric(
+        df["data_reliability_score"], errors="coerce"
+    ).fillna(0.2).clip(0, 1)
 
-    distance_fill = (
-        df["distance_km"].max()
-        if df[
-            "distance_km"
-        ].notna().any()
-        else 0
-    )
-
-    df["_norm_distance"] = (
-        _normalize_series(
-            df[
-                "distance_km"
-            ].fillna(
-                distance_fill
-            ),
-            higher_is_better=False
-        )
-    )
-
-    df["_norm_congestion"] = (
-        _normalize_series(
-            df[
-                "congestion_score"
-            ].fillna(0.5),
-            higher_is_better=False
-        )
-    )
+    golden_time = profile["golden_time_min"]
+    if golden_time and golden_time > 0:
+        df["_golden_violation"] = (
+            (delay_values.fillna(delay_fill) - golden_time).clip(lower=0) / golden_time
+        ).clip(upper=2.0)
+    else:
+        df["_golden_violation"] = 0.0
 
     df["_utility"] = (
-        weights["score"]
-        * df["_norm_score"]
-        + weights["distance"]
-        * df["_norm_distance"]
-        + weights["congestion"]
-        * df["_norm_congestion"]
+        weights["score"] * df["_norm_score"]
+        + weights["delay"] * df["_norm_delay"]
+        + weights["specialist"] * df["_norm_specialist"]
+        + weights["reliability"] * df["_norm_reliability"]
+        - 0.25 * profile["severity_weight"] * df["_golden_violation"]
     )
 
-    remaining_idx = list(
-        df.index
-    )
-
+    remaining_idx = list(df.index)
     ranked_idx = []
 
     if PULP_AVAILABLE:
         while remaining_idx:
-            prob = pulp.LpProblem(
-                "hospital_assignment",
-                pulp.LpMaximize
-            )
+            prob = pulp.LpProblem("hospital_assignment", pulp.LpMaximize)
+            x = {i: pulp.LpVariable(f"x_{i}", cat="Binary") for i in remaining_idx}
+            prob += pulp.lpSum(x[i] * float(df.loc[i, "_utility"]) for i in remaining_idx)
+            prob += pulp.lpSum(x[i] for i in remaining_idx) == 1
+            prob.solve(pulp.PULP_CBC_CMD(msg=False))
 
-            x = {
-                i: pulp.LpVariable(
-                    f"x_{i}",
-                    cat="Binary"
-                )
-                for i in remaining_idx
-            }
-
-            prob += pulp.lpSum(
-                x[i]
-                * float(
-                    df.loc[
-                        i,
-                        "_utility"
-                    ]
-                )
-                for i in remaining_idx
-            )
-
-            prob += pulp.lpSum(
-                x[i]
-                for i in remaining_idx
-            ) == 1
-
-            prob.solve(
-                pulp.PULP_CBC_CMD(
-                    msg=False
-                )
-            )
-
-            chosen = next(
-                (
-                    i
-                    for i in remaining_idx
-                    if (
-                        pulp.value(x[i])
-                        and pulp.value(x[i])
-                        > 0.5
-                    )
-                ),
-                remaining_idx[0]
-            )
-
-            ranked_idx.append(
-                chosen
-            )
-
-            remaining_idx.remove(
-                chosen
-            )
-
+            chosen = next((i for i in remaining_idx if pulp.value(x[i]) and pulp.value(x[i]) > 0.5), remaining_idx[0])
+            ranked_idx.append(chosen)
+            remaining_idx.remove(chosen)
     else:
-        df["_sort_score"] = (
-            pd.to_numeric(
-                df["acceptance_score"],
-                errors="coerce"
-            ).fillna(0)
-        )
+        df["_sort_score"] = pd.to_numeric(df["acceptance_score"], errors="coerce").fillna(0)
+        ranked_idx = df.sort_values(
+            by=["_utility", "_sort_score"],
+            ascending=[False, False],
+            kind="mergesort",
+        ).index.tolist()
+        df = df.drop(columns=["_sort_score"])
 
-        ranked_idx = (
-            df.sort_values(
-                by=[
-                    "_utility",
-                    "_sort_score",
-                ],
-                ascending=[
-                    False,
-                    False,
-                ],
-                kind="mergesort",
-            ).index.tolist()
-        )
-
-        df = df.drop(
-            columns=[
-                "_sort_score"
-            ]
-        )
-
-    df = df.loc[
-        ranked_idx
-    ].copy()
-
-    df[
-        "model_rank_explanation"
-    ] = df.apply(
+    df = df.loc[ranked_idx].copy()
+    df["model_rank_explanation"] = df.apply(
         lambda r: (
-            "MILP 목적함수 점수 "
-            f"{round(r['_utility'], 3)} "
-            "(수용점수/거리/혼잡도 "
-            "가중 반영)"
+            f"MILP 목적함수 점수 {round(r['_utility'], 3)} "
+            f"(예상 치료지연 {r.get('effective_treatment_delay_min', '-')}분, "
+            f"{profile['label']} 프로파일)"
         ),
-        axis=1
+        axis=1,
     )
-
+    df["milp_utility_score"] = df["_utility"].round(6)
     df = df.drop(
-        columns=[
-            "_norm_score",
-            "_norm_distance",
-            "_norm_congestion",
-            "_utility",
-        ]
+        columns=["_norm_score", "_norm_delay", "_norm_specialist", "_norm_reliability", "_golden_violation", "_utility"]
     )
-
-    return df.reset_index(
-        drop=True
-    )
+    return df.reset_index(drop=True)
 
 
-def rank_model_c(
-    acceptable_df
-):
-    """
-    Model C:
-    TOPSIS 다기준 의사결정.
-    """
+def get_topsis_criteria(variant=DEFAULT_TOPSIS_VARIANT, patient=None):
+    """C0~C3 변형 TOPSIS 기준을 추출합니다."""
+    variant = str(variant or DEFAULT_TOPSIS_VARIANT).strip().upper()
+    if variant not in TOPSIS_VARIANTS:
+        raise ValueError(f"알 수 없는 TOPSIS 변형입니다: {variant}")
 
+    config = TOPSIS_VARIANTS[variant]
+    base = TOPSIS_VARIANTS[config["criteria_from"]]["criteria"] if config.get("criteria_from") else config["criteria"]
+
+    criteria = {name: {"benefit": bool(v["benefit"]), "weight": float(v["weight"])} for name, v in base.items()}
+
+    profile = None
+    if config.get("patient_aware"):
+        profile = get_patient_priority_profile(patient or {})
+        profile_weights = config["weight_profiles"][profile["name"]]
+        for name in criteria:
+            criteria[name]["weight"] = float(profile_weights[name])
+            
+    weight_sum = sum(values["weight"] for values in criteria.values())
+    if not math.isclose(weight_sum, 1.0, abs_tol=1e-9):
+        raise ValueError(f"{variant} TOPSIS 가중치 합이 1이 아닙니다: {weight_sum}")
+
+    return criteria, profile
+
+
+def get_topsis_variant_metadata(variant=DEFAULT_TOPSIS_VARIANT, patient=None):
+    """TOPSIS 변형 메타데이터 구조 생성."""
+    variant = str(variant or DEFAULT_TOPSIS_VARIANT).strip().upper()
+    criteria, profile = get_topsis_criteria(variant, patient)
+    config = TOPSIS_VARIANTS[variant]
+    return {
+        "key": variant,
+        "label": config["label"],
+        "description": config["description"],
+        "experimental": bool(config.get("experimental", False)),
+        "patient_profile": profile["name"] if profile else None,
+        "criteria": [
+            {"name": k, "direction": "benefit" if v["benefit"] else "cost", "weight": v["weight"]}
+            for k, v in criteria.items()
+        ],
+    }
+
+
+def _topsis_closeness(df, criteria):
+    """공통 TOPSIS 순수 계산 엔진."""
+    if df.empty:
+        return pd.Series(dtype=float, index=df.index)
+    
+    missing_columns = [name for name in criteria if name not in df.columns]
+    if missing_columns:
+        raise KeyError(f"TOPSIS 기준 컬럼이 없습니다: {', '.join(missing_columns)}")
+
+    matrix = pd.DataFrame(index=df.index)
+    for column, config in criteria.items():
+        values = pd.to_numeric(df[column], errors="coerce")
+        fill_value = (values.min() if config["benefit"] else values.max()) if values.notna().any() else 0.0
+        matrix[column] = values.fillna(fill_value)
+
+    vector_norm = np.sqrt((matrix ** 2).sum()).replace(0, np.nan)
+    normalized = matrix.divide(vector_norm, axis=1).fillna(0.0)
+    weighted = normalized.copy()
+    for column, config in criteria.items():
+        weighted[column] = normalized[column] * float(config["weight"])
+
+    ideal_best = {k: weighted[k].max() if v["benefit"] else weighted[k].min() for k, v in criteria.items()}
+    ideal_worst = {k: weighted[k].min() if v["benefit"] else weighted[k].max() for k, v in criteria.items()}
+
+    distance_best = np.sqrt(sum((weighted[k] - ideal_best[k]) ** 2 for k in criteria))
+    distance_worst = np.sqrt(sum((weighted[k] - ideal_worst[k]) ** 2 for k in criteria))
+    denominator = (distance_best + distance_worst).replace(0, np.nan)
+    return (distance_worst / denominator).fillna(0.5)
+
+
+def rank_model_c(acceptable_df, patient=None, variant=DEFAULT_TOPSIS_VARIANT):
+    """C0/C1/C2/C3 변형 TOPSIS 적용 순위."""
     if acceptable_df.empty:
         return acceptable_df
 
-    df = acceptable_df.copy()
+    patient = patient or {}
+    variant = str(variant or DEFAULT_TOPSIS_VARIANT).strip().upper()
+    criteria, profile = get_topsis_criteria(variant, patient)
+    metadata = get_topsis_variant_metadata(variant, patient)
 
-    criteria = {
-        "acceptance_score": {
-            "benefit": True,
-            "weight": 0.4
-        },
-        "distance_km": {
-            "benefit": False,
-            "weight": 0.3
-        },
-        "required_specialist_count_total": {
-            "benefit": True,
-            "weight": 0.2
-        },
-        "congestion_score": {
-            "benefit": False,
-            "weight": 0.1
-        },
+    df = acceptable_df.copy()
+    df["_topsis_closeness"] = _topsis_closeness(df, criteria)
+    df["_hospital_name_tiebreaker"] = df.apply(get_hospital_name, axis=1)
+    df = df.sort_values(by=["_topsis_closeness", "_hospital_name_tiebreaker"], ascending=[False, True], kind="mergesort")
+
+    profile_text = f", {profile['label']} 가중치" if profile else ""
+    experimental_text = ", 실험안" if metadata["experimental"] else ""
+    df["model_rank_explanation"] = df["_topsis_closeness"].apply(
+        lambda v: f"TOPSIS {variant} 근접도 {round(float(v), 3)} ({metadata['label']}{profile_text}{experimental_text})"
+    )
+    df["topsis_closeness"] = df["_topsis_closeness"].round(6)
+    df["topsis_variant"] = variant
+    df["topsis_variant_label"] = metadata["label"]
+    df["topsis_experimental"] = metadata["experimental"]
+    df = df.drop(columns=["_topsis_closeness", "_hospital_name_tiebreaker"])
+    return df.reset_index(drop=True)
+
+
+def apply_ranking_model(model_key, acceptable_df, patient=None, topsis_variant=DEFAULT_TOPSIS_VARIANT):
+    model_key = (model_key or "A").strip().upper()
+    if model_key == "B": return rank_model_b(acceptable_df, patient=patient), "B"
+    if model_key == "C": return rank_model_c(acceptable_df, patient=patient, variant=topsis_variant), "C"
+    if model_key == "D": return rank_model_d(acceptable_df), "D"
+    return rank_model_a(acceptable_df), "A"
+
+
+# 다중 환자 배치용 함수 구현체
+def _batch_hospital_key(hospital, fallback_index=None):
+    hpid = str(hospital.get("hpid") or "").strip()
+    if hpid and hpid.lower() != "nan": return f"hpid:{hpid}"
+    name = get_hospital_name(hospital)
+    lat, lng = get_hospital_lat_lng(hospital)
+    if lat is not None and lng is not None:
+        return f"name:{name}|{round(float(lat), 5)}|{round(float(lng), 5)}"
+    return f"name:{name}|row:{fallback_index if fallback_index is not None else 'unknown'}"
+
+
+def _batch_capacity(hospital):
+    hvec = to_number(hospital.get("hvec"))
+    return max(1, int(math.floor(hvec))) if hvec is not None else 1
+
+
+def _assignment_cost(candidate, patient):
+    profile = get_patient_priority_profile(patient)
+    delay = to_number(candidate.get("effective_treatment_delay_min"))
+    delay = 999.0 if delay is None else delay
+    clinical = min(1.0, max(0.0, (to_number(candidate.get("acceptance_score")) or 0.0) / 100.0))
+    reliability = min(1.0, max(0.0, to_number(candidate.get("data_reliability_score")) or 0.0))
+    return profile["severity_weight"] * (delay + 35.0 * (1.0 - clinical) + 12.0 * (1.0 - reliability))
+
+
+def solve_batch_candidate_assignment(candidate_rows_by_patient, patients_by_id):
+    patient_ids = list(patients_by_id)
+    capacities, candidate_lookup = {}, {}
+
+    for patient_id in patient_ids:
+        for candidate in candidate_rows_by_patient.get(patient_id, []):
+            hospital_id = candidate["_batch_hospital_id"]
+            candidate_lookup[(patient_id, hospital_id)] = candidate
+            capacities[hospital_id] = max(capacities.get(hospital_id, 0), int(candidate.get("_batch_capacity", 1)))
+
+    assignments = []
+    solver_name = "pulp_cbc" if PULP_AVAILABLE else "severity_greedy_fallback"
+    objective_value = None
+
+    if PULP_AVAILABLE:
+        problem = pulp.LpProblem("multi_patient_hospital_assignment", pulp.LpMinimize)
+        x = {key: pulp.LpVariable(f"x_{p_idx}_{h_idx}", cat="Binary") for p_idx, key in enumerate(candidate_lookup) for h_idx in [0]}
+        unassigned = {patient_id: pulp.LpVariable(f"unassigned_{idx}", cat="Binary") for idx, patient_id in enumerate(patient_ids)}
+        late = {patient_id: pulp.LpVariable(f"late_{idx}", lowBound=0) for idx, patient_id in enumerate(patient_ids)}
+
+        for patient_id in patient_ids:
+            patient_keys = [key for key in candidate_lookup if key[0] == patient_id]
+            problem += pulp.lpSum(x[key] for key in patient_keys) + unassigned[patient_id] == 1
+            golden_time = to_number(patients_by_id[patient_id].get("golden_time_min"))
+            if golden_time and patient_keys:
+                problem += late[patient_id] >= pulp.lpSum(
+                    ((to_number(candidate_lookup[key].get("effective_treatment_delay_min")) or 999.0) - golden_time) * x[key]
+                    for key in patient_keys
+                )
+            else:
+                problem += late[patient_id] == 0
+
+        for hospital_id, capacity in capacities.items():
+            hospital_keys = [key for key in candidate_lookup if key[1] == hospital_id]
+            problem += pulp.lpSum(x[key] for key in hospital_keys) <= capacity
+
+        assignment_cost = pulp.lpSum(_assignment_cost(candidate_lookup[k], patients_by_id[k[0]]) * x[k] for k in candidate_lookup)
+        late_cost = pulp.lpSum(6.0 * get_patient_priority_profile(patients_by_id[p_id])["severity_weight"] * late[p_id] for p_id in patient_ids)
+        unassigned_cost = pulp.lpSum(10000.0 * get_patient_priority_profile(patients_by_id[p_id])["severity_weight"] * unassigned[p_id] for p_id in patient_ids)
+        problem += assignment_cost + late_cost + unassigned_cost
+        problem.solve(pulp.PULP_CBC_CMD(msg=False))
+        objective_value = pulp.value(problem.objective)
+
+        for patient_id in patient_ids:
+            chosen_key = next((k for k in candidate_lookup if k[0] == patient_id and (pulp.value(x[k]) or 0) > 0.5), None)
+            assignments.append((patient_id, candidate_lookup.get(chosen_key) if chosen_key else None))
+    else:
+        remaining_capacity = dict(capacities)
+        ordered_patients = sorted(patient_ids, key=lambda p_id: get_patient_priority_profile(patients_by_id[p_id])["severity_weight"], reverse=True)
+        greedy_result = {}
+        for patient_id in ordered_patients:
+            available = [c for c in candidate_rows_by_patient.get(patient_id, []) if remaining_capacity.get(c["_batch_hospital_id"], 0) > 0]
+            chosen = min(available, key=lambda row: _assignment_cost(row, patients_by_id[patient_id])) if available else None
+            greedy_result[patient_id] = chosen
+            if chosen: remaining_capacity[chosen["_batch_hospital_id"]] -= 1
+        assignments = [(p_id, greedy_result.get(p_id)) for p_id in patient_ids]
+
+    output = []
+    for patient_id, candidate in assignments:
+        patient = patients_by_id[patient_id]
+        if candidate is None:
+            output.append({"patient_id": patient_id, "assigned": False, "reason": "임상 적합 후보 또는 가용 병상이 없어 수동 조정이 필요합니다."})
+            continue
+
+        effective_delay = to_number(candidate.get("effective_treatment_delay_min"))
+        golden_time = to_number(patient.get("golden_time_min"))
+        output.append({
+            "patient_id": patient_id,
+            "assigned": True,
+            "hospital_id": candidate["_batch_hospital_id"],
+            "hospital_name": get_hospital_name(candidate),
+            "hospital_capacity": candidate.get("_batch_capacity"),
+            "eta_min": candidate.get("eta_min"),
+            "effective_treatment_delay_min": effective_delay,
+            "golden_time_min": golden_time,
+            "golden_time_violation_min": round(max(0.0, effective_delay - golden_time), 1) if effective_delay is not None and golden_time else None,
+            "acceptance_score": candidate.get("acceptance_score"),
+            "estimated_acceptance_probability": candidate.get("estimated_acceptance_probability"),
+            "data_reliability_score": candidate.get("data_reliability_score"),
+            "assignment_cost": round(_assignment_cost(candidate, patient), 3),
+        })
+
+    return {
+        "solver": solver_name,
+        "objective_value": round(float(objective_value), 3) if objective_value is not None else None,
+        "patient_count": len(patient_ids),
+        "assigned_count": sum(1 for item in output if item["assigned"]),
+        "unassigned_count": sum(1 for item in output if not item["assigned"]),
+        "assignments": output,
     }
 
-    matrix = pd.DataFrame(
-        index=df.index
-    )
 
-    for col, cfg in criteria.items():
-        values = pd.to_numeric(
-            df[col],
-            errors="coerce"
-        )
+def optimize_batch_assignments(patient_requests, hospital_df):
+    """다중 환자 병상 배치 최적화 진입점 함수."""
+    hospitals = hospital_df.copy().reset_index(drop=True)
+    hospitals["_batch_hospital_id"] = [_batch_hospital_key(row, idx) for idx, row in hospitals.iterrows()]
 
-        values = values.fillna(
-            values.mean()
-            if values.notna().any()
-            else 0
-        )
+    patients_by_id, candidate_rows_by_patient = {}, {}
+    for index, item in enumerate(patient_requests):
+        patient_id = str(item.get("patient_id") or f"patient-{index + 1}")
+        if patient_id in patients_by_id:
+            raise ValueError(f"중복된 patient_id입니다: {patient_id}")
+        patient = enrich_patient_by_category(item["patient"])
+        patients_by_id[patient_id] = patient
+        amb_lat = to_number(item.get("ambulance_lat")) or DEFAULT_AMBULANCE_LAT
+        amb_lng = to_number(item.get("ambulance_lng")) or DEFAULT_AMBULANCE_LNG
 
-        matrix[col] = values
+        acceptable_df, _, _ = filter_acceptable_hospitals(hospitals, patient)
+        acceptable_df = attach_routing_fields(acceptable_df, amb_lat, amb_lng, patient=patient)
+        if acceptable_df.empty:
+            candidate_rows_by_patient[patient_id] = []
+            continue
 
-    norm_matrix = (
-        matrix
-        / np.sqrt(
-            (
-                matrix ** 2
-            ).sum()
-        )
-    )
+        acceptable_df["_batch_capacity"] = acceptable_df.apply(_batch_capacity, axis=1)
+        candidate_rows_by_patient[patient_id] = acceptable_df.to_dict(orient="records")
 
-    norm_matrix = (
-        norm_matrix.fillna(0)
-    )
-
-    weighted = (
-        norm_matrix.copy()
-    )
-
-    for col, cfg in criteria.items():
-        weighted[col] = (
-            norm_matrix[col]
-            * cfg["weight"]
-        )
-
-    ideal_best = {}
-    ideal_worst = {}
-
-    for col, cfg in criteria.items():
-        if cfg["benefit"]:
-            ideal_best[col] = (
-                weighted[col].max()
-            )
-            ideal_worst[col] = (
-                weighted[col].min()
-            )
-        else:
-            ideal_best[col] = (
-                weighted[col].min()
-            )
-            ideal_worst[col] = (
-                weighted[col].max()
-            )
-
-    dist_best = np.sqrt(
-        sum(
-            (
-                weighted[col]
-                - ideal_best[col]
-            ) ** 2
-            for col in criteria
-        )
-    )
-
-    dist_worst = np.sqrt(
-        sum(
-            (
-                weighted[col]
-                - ideal_worst[col]
-            ) ** 2
-            for col in criteria
-        )
-    )
-
-    denom = (
-        dist_best
-        + dist_worst
-    ).replace(
-        0,
-        np.nan
-    )
-
-    closeness = (
-        dist_worst
-        / denom
-    ).fillna(
-        0.5
-    )
-
-    df[
-        "_topsis_closeness"
-    ] = closeness
-
-    df["_sort_score"] = (
-        pd.to_numeric(
-            df["acceptance_score"],
-            errors="coerce"
-        ).fillna(0)
-    )
-
-    df = df.sort_values(
-        by=[
-            "_topsis_closeness",
-            "_sort_score",
-        ],
-        ascending=[
-            False,
-            False,
-        ],
-        kind="mergesort",
-    )
-
-    df[
-        "model_rank_explanation"
-    ] = df[
-        "_topsis_closeness"
-    ].apply(
-        lambda v: (
-            "TOPSIS 근접도"
-            "(closeness coefficient) "
-            f"{round(float(v), 3)} "
-            "(1에 가까울수록 이상적)"
-        )
-    )
-
-    df = df.drop(
-        columns=[
-            "_topsis_closeness",
-            "_sort_score",
-        ]
-    )
-
-    return df.reset_index(
-        drop=True
-    )
-
+    return solve_batch_candidate_assignment(candidate_rows_by_patient, patients_by_id)
 
 def rank_model_d(
     acceptable_df,
@@ -2263,211 +2472,63 @@ def rank_model_d(
     )
 
 
-def apply_ranking_model(
-    model_key,
-    acceptable_df
-):
-    model_key = (
-        model_key or "A"
-    ).strip().upper()
-
-    if model_key == "B":
-        return (
-            rank_model_b(
-                acceptable_df
-            ),
-            "B"
-        )
-
-    if model_key == "C":
-        return (
-            rank_model_c(
-                acceptable_df
-            ),
-            "C"
-        )
-
-    if model_key == "D":
-        return (
-            rank_model_d(
-                acceptable_df
-            ),
-            "D"
-        )
-
-    return (
-        rank_model_a(
-            acceptable_df
-        ),
-        "A"
-    )
-
-
 # =========================================================
 # 5-3. 시스템 성능 검증 지표
 # =========================================================
 
-def compute_performance_metrics(
-    result_df,
-    acceptable_df,
-    top_df,
-    patient,
-    elapsed_ms
-):
-    total = len(
-        result_df
+def compute_performance_metrics(result_df, acceptable_df, top_df, patient, elapsed_ms):
+    total = len(result_df)
+    acceptable_count = len(acceptable_df)
+
+    acceptance_success_rate = round((acceptable_count / total) * 100, 1) if total else 0.0
+
+    golden_time = to_number(patient.get("golden_time_min"))
+    eta_series = pd.to_numeric(top_df["eta_min"], errors="coerce").dropna() if "eta_min" in top_df else pd.Series(dtype=float)
+    treatment_delay_series = (
+        pd.to_numeric(top_df["effective_treatment_delay_min"], errors="coerce").dropna()
+        if "effective_treatment_delay_min" in top_df
+        else pd.Series(dtype=float)
     )
 
-    acceptable_count = len(
-        acceptable_df
-    )
-
-    acceptance_success_rate = (
-        round(
-            (
-                acceptable_count
-                / total
-            )
-            * 100,
-            1
-        )
-        if total
-        else 0.0
-    )
-
-    golden_time = to_number(
-        patient.get(
-            "golden_time_min"
-        )
-    )
-
-    if (
-        "eta_min"
-        in acceptable_df
-    ):
-        eta_series = (
-            pd.to_numeric(
-                acceptable_df[
-                    "eta_min"
-                ],
-                errors="coerce"
-            ).dropna()
-        )
-    else:
-        eta_series = pd.Series(
-            dtype=float
-        )
-
-    if (
-        golden_time
-        and not eta_series.empty
-    ):
-        within_golden = (
-            eta_series
-            <= golden_time
-        ).sum()
-
-        golden_time_compliance_rate = round(
-            (
-                within_golden
-                / len(eta_series)
-            )
-            * 100,
-            1
-        )
-
+    if golden_time and not treatment_delay_series.empty:
+        within_golden = (treatment_delay_series <= golden_time).sum()
+        golden_time_compliance_rate = round((within_golden / len(treatment_delay_series)) * 100, 1)
     else:
         golden_time_compliance_rate = None
 
-    avg_eta = (
-        round(
-            float(
-                eta_series.mean()
-            ),
-            1
-        )
-        if not eta_series.empty
-        else None
-    )
+    avg_eta = round(float(eta_series.mean()), 1) if not eta_series.empty else None
+    p95_eta = round(float(np.percentile(eta_series, 95)), 1) if len(eta_series) > 0 else None
+    avg_treatment_delay = round(float(treatment_delay_series.mean()), 1) if not treatment_delay_series.empty else None
 
-    p95_eta = (
-        round(
-            float(
-                np.percentile(
-                    eta_series,
-                    95
-                )
-            ),
-            1
-        )
-        if len(eta_series) > 0
-        else None
-    )
+    top1_acceptance_probability = None
+    top1_treatment_delay = None
+    if not top_df.empty:
+        top1_acceptance_probability = to_number(top_df.iloc[0].get("estimated_acceptance_probability"))
+        top1_treatment_delay = to_number(top_df.iloc[0].get("effective_treatment_delay_min"))
 
-    if (
-        "congestion_score"
-        in top_df
-    ):
-        congestion_series = (
-            pd.to_numeric(
-                top_df[
-                    "congestion_score"
-                ],
-                errors="coerce"
-            ).dropna()
-        )
-
-    else:
-        congestion_series = (
-            pd.Series(
-                dtype=float
-            )
-        )
-
-    avg_congestion_pct = (
-        round(
-            float(
-                congestion_series.mean()
-            )
-            * 100,
-            1
-        )
-        if not congestion_series.empty
-        else None
-    )
+    congestion_series = pd.to_numeric(top_df["congestion_score"], errors="coerce").dropna() if "congestion_score" in top_df else pd.Series(dtype=float)
+    avg_congestion_pct = round(float(congestion_series.mean()) * 100, 1) if not congestion_series.empty else None
 
     return {
-        "acceptance_success_rate_pct": (
-            acceptance_success_rate
-        ),
-        "golden_time_compliance_rate_pct": (
-            golden_time_compliance_rate
-        ),
+        "acceptance_success_rate_pct": acceptance_success_rate,
+        "golden_time_compliance_rate_pct": golden_time_compliance_rate,
         "avg_eta_min": avg_eta,
         "p95_eta_min": p95_eta,
-        "hospital_congestion_pct": (
-            avg_congestion_pct
+        "avg_effective_treatment_delay_min": avg_treatment_delay,
+        "top1_effective_treatment_delay_min": round(top1_treatment_delay, 1) if top1_treatment_delay is not None else None,
+        "top1_estimated_acceptance_probability_pct": (
+            round(top1_acceptance_probability * 100, 1) if top1_acceptance_probability is not None else None
         ),
-        "computation_time_ms": round(
-            elapsed_ms,
-            1
-        ),
+        "hospital_congestion_pct": avg_congestion_pct,
+        "computation_time_ms": round(elapsed_ms, 1),
         "excluded_metrics": [
             {
                 "name": "재매칭률",
-                "reason": (
-                    "병원의 실제 거절/재요청 이력을 "
-                    "받는 연동이 아직 없어 항상 "
-                    "0으로만 계산되어 의미가 없습니다."
-                ),
+                "reason": "병원의 실제 거절/재요청 이력을 받는 연동이 아직 없어 항상 0으로만 계산되어 의미가 없습니다.",
             },
             {
                 "name": "도착 시 수용률",
-                "reason": (
-                    "구급차 도착 시점의 병원 최종 "
-                    "확정 응답을 받는 연동이 아직 없어 "
-                    "계산할 수 없습니다."
-                ),
+                "reason": "구급차 도착 시점의 병원 최종 확정 응답을 받는 연동이 아직 없어 계산할 수 없습니다.",
             },
         ],
     }
@@ -4089,240 +4150,125 @@ def filter_acceptable_hospitals(
 # 9. 환자 분석 + 병원 수용 가능 여부 판별 API
 # =========================================================
 
-@app.route(
-    "/api/recommend-hospitals",
-    methods=["POST"]
-)
+@app.route("/api/recommend-hospitals", methods=["POST"])
 def recommend_hospitals_api():
-    start_time = (
-        time.perf_counter()
-    )
+    start_time = time.perf_counter()
 
     try:
         data = request.get_json()
+        if not data or "text" not in data:
+            return jsonify({"success": False, "error": "text가 필요합니다."}), 400
 
-        if (
-            not data
-            or "text" not in data
-        ):
-            return jsonify({
-                "success": False,
-                "error": "text가 필요합니다."
-            }), 400
+        raw_patient = analyze_patient(data["text"])
+        patient = enrich_patient_by_category(raw_patient)
 
-        raw_patient = (
-            analyze_patient(
-                data["text"]
-            )
-        )
+        ambulance_lat = to_number(data.get("ambulance_lat")) or DEFAULT_AMBULANCE_LAT
+        ambulance_lng = to_number(data.get("ambulance_lng")) or DEFAULT_AMBULANCE_LNG
+        model_key = data.get("model", "A")
+        topsis_variant = str(data.get("topsis_variant") or DEFAULT_TOPSIS_VARIANT).strip().upper()
 
-        patient = (
-            enrich_patient_by_category(
-                raw_patient
-            )
-        )
+        hospital_df, excel_file, sheet_name = load_hospital_db()
+        acceptable_df, rejected_df, result_df = filter_acceptable_hospitals(hospital_df, patient)
 
-        ambulance_lat = (
-            to_number(
-                data.get(
-                    "ambulance_lat"
-                )
-            )
-            or DEFAULT_AMBULANCE_LAT
-        )
+        # 환자 정보(patient)를 인자로 추가 전달하여 운영 지연 및 가중치를 반영합니다.
+        acceptable_df = attach_routing_fields(acceptable_df, ambulance_lat, ambulance_lng, patient=patient)
+        rejected_df = attach_routing_fields(rejected_df, ambulance_lat, ambulance_lng, patient=patient)
 
-        ambulance_lng = (
-            to_number(
-                data.get(
-                    "ambulance_lng"
-                )
-            )
-            or DEFAULT_AMBULANCE_LNG
-        )
-
-        model_key = (
-            data.get(
-                "model",
-                "A"
-            )
-        )
-
-        (
-            hospital_df,
-            excel_file,
-            sheet_name,
-        ) = load_hospital_db()
-
-        (
-            acceptable_df,
-            rejected_df,
-            result_df,
-        ) = filter_acceptable_hospitals(
-            hospital_df,
-            patient
-        )
-
-        acceptable_df = (
-            attach_routing_fields(
-                acceptable_df,
-                ambulance_lat,
-                ambulance_lng
-            )
-        )
-
-        rejected_df = (
-            attach_routing_fields(
-                rejected_df,
-                ambulance_lat,
-                ambulance_lng
-            )
-        )
-
-        (
-            ranked_acceptable_df,
-            applied_model_key,
-        ) = apply_ranking_model(
+        # TOPSIS 변형 및 환자 중증도 정보를 반영합니다.
+        ranked_acceptable_df, applied_model_key = apply_ranking_model(
             model_key,
-            acceptable_df
+            acceptable_df,
+            patient=patient,
+            topsis_variant=topsis_variant,
         )
 
-        top_acceptable_df = (
-            ranked_acceptable_df
-            .head(10)
-            .copy()
-        )
+        top_acceptable_df = ranked_acceptable_df.head(10).copy()
+        top_rejected_df = rejected_df.head(max(0, 10 - len(top_acceptable_df))).copy()
+        top_result_df = pd.concat([top_acceptable_df, top_rejected_df], ignore_index=True) if not top_rejected_df.empty else top_acceptable_df
 
-        top_rejected_df = (
-            rejected_df
-            .head(
-                max(
-                    0,
-                    10
-                    - len(
-                        top_acceptable_df
-                    )
-                )
-            )
-            .copy()
-        )
-
-        if not top_rejected_df.empty:
-            top_result_df = pd.concat(
-                [
-                    top_acceptable_df,
-                    top_rejected_df,
-                ],
-                ignore_index=True
-            )
-
-        else:
-            top_result_df = (
-                top_acceptable_df
-            )
-
-        elapsed_ms = (
-            (
-                time.perf_counter()
-                - start_time
-            )
-            * 1000
-        )
-
-        performance_metrics = (
-            compute_performance_metrics(
-                result_df=result_df,
-                acceptable_df=acceptable_df,
-                top_df=top_acceptable_df,
-                patient=patient,
-                elapsed_ms=elapsed_ms,
-            )
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        performance_metrics = compute_performance_metrics(
+            result_df=result_df,
+            acceptable_df=acceptable_df,
+            top_df=top_acceptable_df,
+            patient=patient,
+            elapsed_ms=elapsed_ms,
         )
 
         return jsonify(
             {
                 "success": True,
-                "source_file": (
-                    excel_file
-                ),
-                "sheet_name": (
-                    sheet_name
-                ),
-                "total_hospital_count": (
-                    len(result_df)
-                ),
-                "display_hospital_count": (
-                    len(
-                        top_result_df
-                    )
-                ),
+                "source_file": excel_file,
+                "sheet_name": sheet_name,
+                "total_hospital_count": len(result_df),
+                "display_hospital_count": len(top_result_df),
                 "patient": patient,
-                "acceptable_count": (
-                    len(
-                        acceptable_df
-                    )
+                "acceptable_count": len(acceptable_df),
+                "rejected_count": len(rejected_df),
+                "display_acceptable_count": len(top_acceptable_df),
+                "display_rejected_count": len(top_rejected_df),
+                "acceptable_hospitals": dataframe_to_records(top_acceptable_df),
+                "rejected_hospitals": dataframe_to_records(top_rejected_df),
+                "all_results": dataframe_to_records(top_result_df),
+                "applied_model": {**MODEL_INFO[applied_model_key], "key": applied_model_key},
+                "topsis_variant": (
+                    get_topsis_variant_metadata(topsis_variant, patient)
+                    if applied_model_key == "C"
+                    else None
                 ),
-                "rejected_count": (
-                    len(
-                        rejected_df
-                    )
-                ),
-                "display_acceptable_count": (
-                    len(
-                        top_acceptable_df
-                    )
-                ),
-                "display_rejected_count": (
-                    len(
-                        top_rejected_df
-                    )
-                ),
-                "acceptable_hospitals": (
-                    dataframe_to_records(
-                        top_acceptable_df
-                    )
-                ),
-                "rejected_hospitals": (
-                    dataframe_to_records(
-                        top_rejected_df
-                    )
-                ),
-                "all_results": (
-                    dataframe_to_records(
-                        top_result_df
-                    )
-                ),
-                "applied_model": {
-                    **MODEL_INFO[
-                        applied_model_key
-                    ],
-                    "key": (
-                        applied_model_key
-                    ),
-                },
-                "ambulance_location": {
-                    "lat": (
-                        ambulance_lat
-                    ),
-                    "lng": (
-                        ambulance_lng
-                    ),
-                },
-                "performance_metrics": (
-                    performance_metrics
-                ),
+                "patient_priority_profile": get_patient_priority_profile(patient),
+                "ambulance_location": {"lat": ambulance_lat, "lng": ambulance_lng},
+                "performance_metrics": performance_metrics,
             }
         )
+    except Exception as e:
+        print("RECOMMEND ERROR:", e)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# 신규 추가: 다중 환자 병상 배치 최적화 API
+@app.route("/api/optimize-batch", methods=["POST"])
+def optimize_batch_api():
+    start_time = time.perf_counter()
+    try:
+        body = request.get_json() or {}
+        patient_items = body.get("patients") or []
+        if not isinstance(patient_items, list) or not patient_items:
+            return jsonify({"success": False, "error": "patients 배열이 필요합니다."}), 400
+        if len(patient_items) > 30:
+            return jsonify({"success": False, "error": "한 번에 최대 30명까지 배정할 수 있습니다."}), 400
+
+        prepared = []
+        for index, item in enumerate(patient_items):
+            if item.get("patient"):
+                structured = PatientInfo(**item["patient"])
+                patient = structured.model_dump() if hasattr(structured, "model_dump") else structured.dict()
+            elif str(item.get("text") or "").strip():
+                patient = analyze_patient(item["text"])
+            else:
+                return jsonify({"success": False, "error": f"{index + 1}번째 환자에 text 또는 patient 정보가 필요합니다."}), 400
+
+            prepared.append({
+                "patient_id": str(item.get("patient_id") or f"patient-{index + 1}"),
+                "patient": patient,
+                "ambulance_lat": item.get("ambulance_lat"),
+                "ambulance_lng": item.get("ambulance_lng"),
+            })
+
+        hospital_df, excel_file, sheet_name = load_hospital_db()
+        result = optimize_batch_assignments(prepared, hospital_df)
+        result.update({
+            "success": True,
+            "source_file": excel_file,
+            "sheet_name": sheet_name,
+            "applied_model": {**MODEL_INFO["B"], "key": "B"},
+            "computation_time_ms": round((time.perf_counter() - start_time) * 1000, 1),
+        })
+        return jsonify(result)
 
     except Exception as e:
-        print(
-            "RECOMMEND ERROR:",
-            e
-        )
-
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+        print("BATCH OPTIMIZE ERROR:", e)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # =========================================================
