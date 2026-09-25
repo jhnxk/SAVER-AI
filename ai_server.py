@@ -236,6 +236,11 @@ DEFAULT_AMBULANCE_LNG = 127.3845
 # .env에 KAKAO_REST_API_KEY가 있어야 실제 도로 경로/실시간 교통 ETA를 조회할 수 있다.
 KAKAO_REST_API_KEY = os.getenv("KAKAO_REST_API_KEY")
 KAKAO_JAVASCRIPT_KEY = os.getenv("KAKAO_JAVASCRIPT_KEY")
+
+# "병원 DB 관리" 버튼이 이동할 Streamlit(app.py) 주소.
+# Render처럼 서로 다른 도메인에 배포된 환경에서는 localhost로는 접근할 수 없으므로
+# .env에 실제 배포 주소(예: https://saver-ai-1.onrender.com)를 넣어줘야 한다.
+STREAMLIT_DB_MANAGER_URL = os.getenv("STREAMLIT_DB_MANAGER_URL", "http://localhost:8501")
 KAKAO_REQUEST_TIMEOUT_SEC = 15
 
 # 환자 위치 랜덤 생성 범위. 지도팀 코드의 전국 시연용 반경과 같은 의미다.
@@ -1075,6 +1080,20 @@ def _is_gemini_quota_exceeded(error):
     )
 
 
+def _friendly_gemini_error_message(error):
+    """
+    Gemini 관련 오류를 사용자가 바로 이해할 수 있는 한국어 메시지로 바꾼다.
+    Gemini와 무관한 오류(DB 로딩 실패 등)는 원본 메시지를 그대로 돌려준다.
+    """
+    if _is_gemini_quota_exceeded(error):
+        return "AI 분석 서버의 사용량(쿼터)을 모두 소진했습니다. 잠시 후 다시 시도해 주세요."
+
+    if _is_gemini_503(error):
+        return "AI 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해 주세요."
+
+    return str(error)
+
+
 def _current_gemini_key_index():
     with _gemini_key_lock:
         return _gemini_key_index
@@ -1125,6 +1144,48 @@ def _generate_patient_with_model(model_name, prompt):
     raise last_error
 
 
+# 503(UNAVAILABLE/HIGH DEMAND) 재시도 설정. .env에서 조절 가능.
+GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
+GEMINI_RETRY_BASE_DELAY_SEC = float(os.getenv("GEMINI_RETRY_BASE_DELAY_SEC", "1.5"))
+
+
+def _generate_patient_with_retry(model_name, prompt, max_retries=None):
+    """
+    같은 모델로 503(일시적 과부하)이 나면 지수 백오프(+지터)를 두고
+    최대 max_retries회까지 재시도한다.
+    503이 아닌 오류(쿼터 초과 등은 _generate_patient_with_model 내부에서 처리됨)는
+    바로 올려보낸다.
+    """
+    if max_retries is None:
+        max_retries = GEMINI_MAX_RETRIES
+
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            return _generate_patient_with_model(model_name, prompt)
+        except Exception as error:
+            last_error = error
+
+            if not _is_gemini_503(error):
+                raise
+
+            if attempt == max_retries:
+                break
+
+            # 지수 백오프: 1.5s, 3s, 6s ... + 0~30% 지터(동시 요청 몰림 방지)
+            delay = GEMINI_RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1))
+            delay += random.uniform(0, delay * 0.3)
+
+            print(
+                f"GEMINI 503: {model_name} 과부하 -> "
+                f"{attempt}/{max_retries}회 재시도, {delay:.1f}초 대기"
+            )
+            time.sleep(delay)
+
+    raise last_error
+
+
 def analyze_patient(text: str):
     prompt = f"""
 너는 응급의료 환자 상태를 구조화하는 AI이다.
@@ -1172,7 +1233,7 @@ req_severe_acceptance:
 """
 
     try:
-        response = _generate_patient_with_model(
+        response = _generate_patient_with_retry(
             GEMINI_MODEL,
             prompt,
         )
@@ -1187,11 +1248,11 @@ req_severe_acceptance:
             raise
 
         print(
-            f"GEMINI 503: {GEMINI_MODEL} unavailable -> "
+            f"GEMINI 503: {GEMINI_MODEL} 재시도 {GEMINI_MAX_RETRIES}회 모두 실패 -> "
             f"fallback to {GEMINI_FALLBACK_MODEL}"
         )
 
-        response = _generate_patient_with_model(
+        response = _generate_patient_with_retry(
             GEMINI_FALLBACK_MODEL,
             prompt,
         )
@@ -1233,7 +1294,7 @@ def analyze_patient_api():
 
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": _friendly_gemini_error_message(e)
         }), 500
 
 
@@ -1580,6 +1641,108 @@ def call_kakao_route(
     return data
 
 
+# "병원 수용 가능 여부 판별 결과" 표에 쓸 ETA/거리를 이송 경로 표시(내비게이션) 화면과
+# 동일한 방식(카카오모빌리티 실제 경로 API)으로 맞추기 위한 다중 목적지 조회.
+KAKAO_ETA_BATCH_MAX_DESTINATIONS = 30
+
+# 병원이 많을 때 매번 전체를 카카오 API로 조회하면 느리고 호출량도 커지므로,
+# 직선거리가 가까운 순으로 최대 이 개수까지만 실제 경로를 조회한다.
+# (.env의 KAKAO_ETA_MAX_CANDIDATES로 조절 가능. 값을 늘릴수록 정확도는 오르고 속도는 느려진다.)
+KAKAO_ETA_MAX_CANDIDATES = int(os.getenv("KAKAO_ETA_MAX_CANDIDATES", "60"))
+
+# 주의: 직선거리로 뽑은 후보 안에 "실제로는 도로가 더 빠른" 병원이 없으리라는 보장은 없다
+# (직선으로는 가깝지만 우회가 필요한 병원, 반대로 직선으로는 조금 멀어도 큰길이 뚫려 있어
+#  실제로는 더 빠른 병원이 있을 수 있음). 이를 완화하기 위해, 단순히 가까운 N개를 딱 자르지 않고
+# "N번째로 가까운 병원의 직선거리 × 여유배율" 안에 드는 병원은 모두 후보에 포함시킨다.
+KAKAO_ETA_CANDIDATE_MARGIN = float(os.getenv("KAKAO_ETA_CANDIDATE_MARGIN", "1.5"))
+
+# 여유배율을 적용해도 병원 수가 무한정 늘어나지 않도록 최종 상한선을 둔다.
+KAKAO_ETA_HARD_CAP = int(os.getenv("KAKAO_ETA_HARD_CAP", "90"))
+
+
+def call_kakao_multi_eta(origin_lat, origin_lng, destinations):
+    """
+    destinations: [{"key": "0", "lat": .., "lng": ..}, ...] (최대 30개)
+    반환: {key: {"distance_km": .., "eta_min": ..}}
+    실패했거나 경로를 못 찾은 목적지는 결과에서 제외된다(호출부에서 haversine 값으로 폴백).
+
+    이송 경로 표시 화면(renderRoutePreview)과 동일하게,
+    카카오 응답의 duration(초)/distance(m)를 그대로 분/㎞로 변환하며
+    추가 오버헤드(FIXED_DISPATCH_OVERHEAD_MIN)는 더하지 않는다.
+    """
+    if not KAKAO_REST_API_KEY or not destinations:
+        return {}
+
+    if not is_valid_korean_coordinate(origin_lat, origin_lng):
+        return {}
+
+    payload_destinations = []
+    for dest in destinations:
+        lat, lng = dest.get("lat"), dest.get("lng")
+        if not is_valid_korean_coordinate(lat, lng):
+            continue
+        payload_destinations.append({
+            "key": str(dest.get("key")),
+            "x": float(lng),
+            "y": float(lat),
+        })
+
+    if not payload_destinations:
+        return {}
+
+    try:
+        response = requests.post(
+            "https://apis-navi.kakaomobility.com/v1/destinations/directions",
+            headers={
+                "Authorization": f"KakaoAK {KAKAO_REST_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "origin": {"x": float(origin_lng), "y": float(origin_lat)},
+                "destinations": payload_destinations,
+                "radius": 10000,
+                "priority": "TIME",
+                "roadevent": 0,
+            },
+            timeout=KAKAO_REQUEST_TIMEOUT_SEC,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as error:
+        print(f"KAKAO MULTI ETA 호출 실패: {error}")
+        return {}
+
+    results = {}
+    for route in (data.get("routes") or []):
+        if route.get("result_code") != 0:
+            continue
+
+        summary = route.get("summary") or {}
+        distance_m = summary.get("distance")
+        duration_s = summary.get("duration")
+
+        if distance_m is None or duration_s is None:
+            continue
+
+        key = str(route.get("key"))
+        results[key] = {
+            # 프론트엔드 renderRoutePreview()와 동일한 반올림 방식으로 맞춘다.
+            "distance_km": round(distance_m / 1000, 2),
+            "eta_min": max(1, round(duration_s / 60)),
+        }
+
+    return results
+
+
+def call_kakao_multi_eta_batched(origin_lat, origin_lng, destinations):
+    """카카오 다중목적지 API는 한 번에 최대 30개까지만 되므로 잘라서 여러 번 호출한다."""
+    merged = {}
+    for start in range(0, len(destinations), KAKAO_ETA_BATCH_MAX_DESTINATIONS):
+        chunk = destinations[start:start + KAKAO_ETA_BATCH_MAX_DESTINATIONS]
+        merged.update(call_kakao_multi_eta(origin_lat, origin_lng, chunk))
+    return merged
+
+
 def random_location_near_hospital(
     hospital
 ):
@@ -1881,6 +2044,7 @@ def attach_routing_fields(hospital_df, ambulance_lat, ambulance_lng, patient=Non
     if hospital_df.empty:
         hospital_df["distance_km"] = []
         hospital_df["eta_min"] = []
+        hospital_df["eta_is_routed"] = []
         hospital_df["congestion_score"] = []
         hospital_df["data_freshness_score"] = []
         hospital_df["data_reliability_score"] = []
@@ -1893,16 +2057,66 @@ def attach_routing_fields(hospital_df, ambulance_lat, ambulance_lng, patient=Non
         hospital_df["specialty_margin_basis"] = []
         return hospital_df
 
-    distances, etas, congestions = [], [], []
-    operational_estimates, specialty_margins, specialty_margin_bases = [], [], []
-
+    # 1) 우선 모든 병원에 대해 직선거리 기반 근사치를 계산해둔다.
+    #    카카오 API 호출이 실패하거나, 아래 KAKAO_ETA_MAX_CANDIDATES를 넘어가는
+    #    병원에 대한 폴백 값으로 쓰인다.
+    distances, etas = [], []
     for _, row in hospital_df.iterrows():
         distance_km, eta_min = compute_distance_and_eta(row, ambulance_lat, ambulance_lng)
-        congestion_score = compute_congestion_score(row)
         distances.append(distance_km)
         etas.append(eta_min)
+
+    eta_is_routed = [False] * len(hospital_df)
+
+    # 2) "이송 경로 표시" 화면과 동일한 카카오모빌리티 실제 경로 API로 값을 덮어쓴다.
+    #    병원이 너무 많으면 느려지므로, 직선거리가 가까운 순으로
+    #    KAKAO_ETA_MAX_CANDIDATES개까지만 실제 경로를 조회한다.
+    if KAKAO_REST_API_KEY:
+        sorted_idx = sorted(
+            range(len(hospital_df)),
+            key=lambda i: (distances[i] if distances[i] is not None else float("inf")),
+        )
+
+        if len(sorted_idx) <= KAKAO_ETA_MAX_CANDIDATES:
+            # 병원 수가 이미 적으면(예: 진료과/장비로 걸러진 수용가능 목록) 전부 실제 경로로 조회한다.
+            order = sorted_idx
+        else:
+            cutoff_idx = sorted_idx[KAKAO_ETA_MAX_CANDIDATES - 1]
+            cutoff_distance = distances[cutoff_idx]
+
+            if cutoff_distance is None:
+                order = sorted_idx[:KAKAO_ETA_MAX_CANDIDATES]
+            else:
+                # N번째로 가까운 병원의 직선거리 × 여유배율 안에 드는 병원은 모두 포함시켜,
+                # "직선으로는 조금 멀지만 실제 도로는 더 빠른" 병원이 통째로 빠지지 않게 한다.
+                margin_distance = cutoff_distance * KAKAO_ETA_CANDIDATE_MARGIN
+                order = [
+                    i for i in sorted_idx
+                    if (distances[i] if distances[i] is not None else float("inf")) <= margin_distance
+                ][:KAKAO_ETA_HARD_CAP]
+
+        destinations = []
+        for i in order:
+            hosp_lat, hosp_lng = get_hospital_lat_lng(hospital_df.iloc[i])
+            if hosp_lat is None or hosp_lng is None:
+                continue
+            destinations.append({"key": str(i), "lat": hosp_lat, "lng": hosp_lng})
+
+        kakao_results = call_kakao_multi_eta_batched(ambulance_lat, ambulance_lng, destinations)
+
+        for key, values in kakao_results.items():
+            i = int(key)
+            distances[i] = values["distance_km"]
+            etas[i] = values["eta_min"]
+            eta_is_routed[i] = True
+
+    congestions = []
+    operational_estimates, specialty_margins, specialty_margin_bases = [], [], []
+
+    for idx, (_, row) in enumerate(hospital_df.iterrows()):
+        congestion_score = compute_congestion_score(row)
         congestions.append(congestion_score)
-        operational_estimates.append(compute_operational_estimates(row, eta_min, congestion_score, now=as_of))
+        operational_estimates.append(compute_operational_estimates(row, etas[idx], congestion_score, now=as_of))
         specialty_margin, specialty_margin_basis = compute_specialty_margin(row, patient or {})
         specialty_margins.append(specialty_margin)
         specialty_margin_bases.append(specialty_margin_basis)
@@ -1910,6 +2124,8 @@ def attach_routing_fields(hospital_df, ambulance_lat, ambulance_lng, patient=Non
     hospital_df = hospital_df.copy()
     hospital_df["distance_km"] = distances
     hospital_df["eta_min"] = etas
+    # true면 카카오 실제 경로 기준, false면 직선거리 근사치(카카오 호출 실패/범위 밖)임을 프론트엔드에서 구분할 수 있게 한다.
+    hospital_df["eta_is_routed"] = eta_is_routed
     hospital_df["congestion_score"] = congestions
     for col in operational_estimates[0]:
         hospital_df[col] = [estimate[col] for estimate in operational_estimates]
@@ -4161,15 +4377,18 @@ def recommend_hospitals_api():
 
         raw_patient = analyze_patient(data["text"])
         patient = enrich_patient_by_category(raw_patient)
-
+        
+        
         ambulance_lat = to_number(data.get("ambulance_lat")) or DEFAULT_AMBULANCE_LAT
         ambulance_lng = to_number(data.get("ambulance_lng")) or DEFAULT_AMBULANCE_LNG
+        
+            
         model_key = data.get("model", "A")
         topsis_variant = str(data.get("topsis_variant") or DEFAULT_TOPSIS_VARIANT).strip().upper()
 
         hospital_df, excel_file, sheet_name = load_hospital_db()
         acceptable_df, rejected_df, result_df = filter_acceptable_hospitals(hospital_df, patient)
-
+        ''' ----------------------------------------------------------------------------------------------------------------원래
         # 환자 정보(patient)를 인자로 추가 전달하여 운영 지연 및 가중치를 반영합니다.
         acceptable_df = attach_routing_fields(acceptable_df, ambulance_lat, ambulance_lng, patient=patient)
         rejected_df = attach_routing_fields(rejected_df, ambulance_lat, ambulance_lng, patient=patient)
@@ -4181,10 +4400,167 @@ def recommend_hospitals_api():
             patient=patient,
             topsis_variant=topsis_variant,
         )
+        '''
+        acceptable_df = attach_routing_fields(
+            acceptable_df,
+            ambulance_lat,
+            ambulance_lng,
+            patient=patient
+            )     
+
+        rejected_df = attach_routing_fields(
+            rejected_df,
+            ambulance_lat,
+            ambulance_lng,
+            patient=patient
+        )
+
+        # ---------------------------------------------------------
+        # TOP 10 추천에는 카카오 실제 경로값이 확인된 병원만 사용
+        # eta_is_routed=True:
+        #   카카오모빌리티 실제 경로 API로 거리/ETA를 계산한 병원
+        #  
+        # eta_is_routed=False:
+        #   직선거리 기반 fallback 값만 있는 병원
+        # ---------------------------------------------------------
+        routed_acceptable_df = acceptable_df[
+            acceptable_df["eta_is_routed"] == True
+        ].copy()
+
+        # 카카오 실제 경로값이 있는 병원만 순위 산정
+        ranked_acceptable_df, applied_model_key = apply_ranking_model(
+            model_key,
+            routed_acceptable_df,
+            patient=patient,
+            topsis_variant=topsis_variant,
+        )
+        
+        # =========================================================
+        # 최종 TOP 10
+        # =========================================================
+
+        # =========================================================
+        # 최종 TOP 10
+        # =========================================================
 
         top_acceptable_df = ranked_acceptable_df.head(10).copy()
-        top_rejected_df = rejected_df.head(max(0, 10 - len(top_acceptable_df))).copy()
-        top_result_df = pd.concat([top_acceptable_df, top_rejected_df], ignore_index=True) if not top_rejected_df.empty else top_acceptable_df
+
+        top_rejected_df = rejected_df.head(
+            max(0, 10 - len(top_acceptable_df))
+        ).copy()
+
+
+        # =========================================================
+        # 최종 표시 병원은 수용 가능/불가 여부와 관계없이
+        # "이송 경로 표시"와 동일한 카카오 단일 목적지 API로
+        # ETA / 거리를 한 번 더 확인한다.
+        # =========================================================
+        def refresh_final_route_values(
+            hospital_df,
+            ambulance_lat,
+            ambulance_lng
+        ):
+            if hospital_df.empty:
+                return hospital_df
+
+            hospital_df = hospital_df.copy()
+
+            for idx, row in hospital_df.iterrows():
+                try:
+                    hospital_lat, hospital_lng = get_hospital_lat_lng(row)
+
+                    if hospital_lat is None or hospital_lng is None:
+                        continue
+
+                    route_data = call_kakao_route(
+                        ambulance_lat,
+                        ambulance_lng,
+                        hospital_lat,
+                        hospital_lng
+                    )
+
+                    routes = route_data.get("routes") or []
+
+                    if not routes:
+                        continue
+
+                    route = next(
+                        (
+                            r for r in routes
+                            if r.get("result_code") == 0
+                        ),
+                        None
+                    )
+
+                    if not route:
+                        continue
+
+                    summary = route.get("summary") or {}
+
+                    distance_m = summary.get("distance")
+                    duration_s = summary.get("duration")
+
+                    if distance_m is None or duration_s is None:
+                        continue
+
+                    # "이송 경로 표시"와 동일한 카카오 결과값
+                    hospital_df.at[idx, "distance_km"] = round(
+                        float(distance_m) / 1000,
+                        2
+                    )
+
+                    hospital_df.at[idx, "eta_min"] = max(
+                    1,
+                        round(float(duration_s) / 60)
+                    )
+
+                    hospital_df.at[idx, "eta_is_routed"] = True
+
+                except Exception as route_error:
+                    print(
+                        f"최종 TOP10 카카오 경로 재조회 실패 "
+                        f"({get_hospital_name(row)}): {route_error}"
+                    )
+
+            return hospital_df
+        #-----------------------------------------------------------------------------
+
+
+        # =========================================================
+        # 수용 가능 TOP 10
+        # =========================================================
+        top_acceptable_df = refresh_final_route_values(
+            top_acceptable_df,
+            ambulance_lat,
+            ambulance_lng
+        )
+
+
+        # =========================================================
+        # 수용 불가 병원도 최종 화면에 표시된다면
+        # 반드시 동일하게 카카오 단일 목적지 API 재조회
+        # =========================================================
+        top_rejected_df = refresh_final_route_values(
+            top_rejected_df,
+            ambulance_lat,
+            ambulance_lng
+        )
+
+
+        # =========================================================
+        # 최종 표시 TOP 10
+        # =========================================================
+        top_result_df = (
+            pd.concat(
+                [
+                    top_acceptable_df,
+                    top_rejected_df
+                ],
+                ignore_index=True
+            )
+            if not top_rejected_df.empty
+            else top_acceptable_df
+        )
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         performance_metrics = compute_performance_metrics(
@@ -4223,7 +4599,7 @@ def recommend_hospitals_api():
         )
     except Exception as e:
         print("RECOMMEND ERROR:", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": _friendly_gemini_error_message(e)}), 500
 
 
 # 신규 추가: 다중 환자 병상 배치 최적화 API
@@ -4777,6 +5153,10 @@ def frontend_config_api():
         "success": True,
         "kakao_javascript_key": (
             KAKAO_JAVASCRIPT_KEY
+            or ""
+        ),
+        "streamlit_db_manager_url": (
+            STREAMLIT_DB_MANAGER_URL
             or ""
         ),
     })
