@@ -182,7 +182,7 @@
         </span>
         <span class="text-slate-300 font-medium">Flask AI 서버 5050</span>
       </div>
-      <a href="http://localhost:8501" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg font-medium transition">
+      <a id="dbManagerLink" href="http://localhost:8501" target="_blank" rel="noopener" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg font-medium transition">
         <i class="fa-solid fa-database mr-1"></i>병원 DB 관리
       </a>
     </div>
@@ -541,6 +541,11 @@
         const config = await response.json();
         const appKey = config.kakao_javascript_key;
 
+        const dbManagerLink = document.getElementById("dbManagerLink");
+        if (dbManagerLink && config.streamlit_db_manager_url) {
+          dbManagerLink.href = config.streamlit_db_manager_url;
+        }
+
         if (!appKey) {
           console.error("KAKAO_JAVASCRIPT_KEY is empty. Check your .env file.");
           return false;
@@ -849,7 +854,7 @@
         if (!response.ok || !result.success) throw new Error(result.error || "환자 위치 랜덤 생성 실패");
 
         const loc = result.patient_location;
-        setAmbulanceLocation(loc.lat, loc.lng, `랜덤 환자 위치 생성됨 · 기준 병원: ${loc.anchor_hospital_name}`);
+        setAmbulanceLocation(loc.lat, loc.lng, `랜덤 환자 위치 생성됨`);
 
         const jsonOutput = document.getElementById("jsonOutput");
         if (jsonOutput) {
@@ -928,6 +933,12 @@
       jsonOutput.textContent = JSON.stringify({ status: "running", message: "환자 상태 분석 및 병원 DB 비교 중" }, null, 2);
 
       try {
+        console.log("🚑 병원 추천에 전달하는 위치:", {
+          ambulanceLat,
+          ambulanceLng
+        });
+      
+
         const response = await fetch("/api/recommend-hospitals", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
