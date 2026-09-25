@@ -5,6 +5,7 @@ import subprocess
 import time
 from pathlib import Path
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -86,7 +87,7 @@ for key, value in default_states.items():
 # =========================================================
 
 def add_log(message):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
     st.session_state.run_log.append(f"[{now}] {message}")
     st.session_state.run_log = st.session_state.run_log[-40:]
 
@@ -246,7 +247,7 @@ def sync_current_db_to_saver(df=None):
         json={
             "hospitals": hospitals,
             "source": "streamlit_runtime",
-            "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "synced_at": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S"),
         },
         timeout=30,
     )
@@ -351,7 +352,7 @@ def refresh_realtime_data(trigger="수동"):
         )
 
         st.session_state.hospital_df = df
-        st.session_state.last_fetch = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.last_fetch = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
         st.session_state.last_realtime_refresh_epoch = time.time()
         st.session_state.run_status = "실시간 갱신 완료"
         st.session_state.excel_saved = False
