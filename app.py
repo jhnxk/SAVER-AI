@@ -35,7 +35,10 @@ SAVER_DB_FILE = "saver_current_hospital_db.xlsx"
 NATIONAL_UPDATE_SCRIPT = "update_realtime_resources_national.py"
 DEPARTMENT_UPDATE_SCRIPT = "update_departments_hira_api.py"
 
-RECOMMENDATION_SYSTEM_URL = "http://127.0.0.1:5050"
+RECOMMENDATION_SYSTEM_URL = os.getenv(
+    "RECOMMENDATION_SYSTEM_URL",
+    "http://127.0.0.1:5050"
+)
 SAVER_SYNC_URL = f"{RECOMMENDATION_SYSTEM_URL}/api/sync-hospitals"
 
 # 화면/저장 파일에서 숨길 컬럼
