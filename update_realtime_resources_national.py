@@ -2,6 +2,7 @@ import os
 import re
 import time
 import difflib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
 from pathlib import Path
@@ -376,31 +377,39 @@ def mark_unmatched(master_row, note):
 # =========================================================
 
 def fetch_national_realtime_api():
+    """시도별 실시간 API를 병렬로 호출해 전국 데이터를 합친다.
+
+    기존에는 최대 18개 시·도를 순차 호출하여 한 지역의 응답 지연/timeout이
+    전체 갱신시간에 누적됐다. API 내용과 매칭 로직은 바꾸지 않고 독립적인
+    시·도 요청만 최대 4개씩 병렬 실행한다.
     """
-    시도별 응급의료 실시간 가용병상 API를 호출해 전국 데이터를 합친다.
-    """
-    print("[2/4] 전국 응급의료기관 실시간 API 호출 중...")
+    print("[2/4] 전국 응급의료기관 실시간 API 호출 중 (최대 4개 병렬)...")
 
     all_dfs = []
 
-    for idx, sido in enumerate(SIDO_LIST, start=1):
-        print(f"  - [{idx}/{len(SIDO_LIST)}] {sido} 호출 중...")
+    def fetch_one(index, sido):
+        df = fetch_realtime_beds(stage1=sido)
+        if df is not None and not df.empty:
+            df = df.copy()
+            df["api_query_sido"] = sido
+        return index, sido, df
 
-        try:
-            df = fetch_realtime_beds(stage1=sido)
-
-            if df is not None and not df.empty:
-                df["api_query_sido"] = sido
-                all_dfs.append(df)
-                print(f"    수집: {len(df)}건")
-            else:
-                print("    수집: 0건")
-
-            time.sleep(0.2)
-
-        except Exception as e:
-            print(f"    실패: {e}")
-            continue
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(fetch_one, idx, sido): (idx, sido)
+            for idx, sido in enumerate(SIDO_LIST, start=1)
+        }
+        for future in as_completed(futures):
+            idx, sido = futures[future]
+            try:
+                _, _, df = future.result()
+                if df is not None and not df.empty:
+                    all_dfs.append(df)
+                    print(f"  - [{idx}/{len(SIDO_LIST)}] {sido}: {len(df)}건")
+                else:
+                    print(f"  - [{idx}/{len(SIDO_LIST)}] {sido}: 0건")
+            except Exception as e:
+                print(f"  - [{idx}/{len(SIDO_LIST)}] {sido} 실패: {e}")
 
     if not all_dfs:
         print("    ! 실시간 API에서 수집된 데이터가 없습니다.")
@@ -408,10 +417,9 @@ def fetch_national_realtime_api():
 
     realtime_df = pd.concat(all_dfs, ignore_index=True)
     realtime_df = realtime_df.drop_duplicates()
-
     print(f"    - 전국 실시간 API 수집 완료: {len(realtime_df)}건")
-
     return realtime_df
+
 
 
 # =========================================================
