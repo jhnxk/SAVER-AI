@@ -5,7 +5,6 @@ import subprocess
 import time
 from pathlib import Path
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -22,7 +21,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("응급의료 병원 DB 실시간 업데이트")
+st.title("응급의료 병원 DB 실시간 업데이트 프로토타입")
 st.caption(
     "전국 상급종합병원/종합병원 DB를 기준으로 공공데이터 API를 호출해 "
     "병원별 실시간 가용 정보와 진료과/전문의/특수진료/의료장비 정보를 관리하는 구조입니다."
@@ -36,10 +35,7 @@ SAVER_DB_FILE = "saver_current_hospital_db.xlsx"
 NATIONAL_UPDATE_SCRIPT = "update_realtime_resources_national.py"
 DEPARTMENT_UPDATE_SCRIPT = "update_departments_hira_api.py"
 
-RECOMMENDATION_SYSTEM_URL = os.getenv(
-    "RECOMMENDATION_SYSTEM_URL",
-    "http://127.0.0.1:5050"
-)
+RECOMMENDATION_SYSTEM_URL = "http://127.0.0.1:5050"
 SAVER_SYNC_URL = f"{RECOMMENDATION_SYSTEM_URL}/api/sync-hospitals"
 
 # 화면/저장 파일에서 숨길 컬럼
@@ -70,7 +66,7 @@ default_states = {
     "initial_realtime_refresh_attempted": False,
     "initial_realtime_refresh_success": False,
     # 주기 자동 갱신 설정
-    "auto_refresh_enabled": True,
+    "auto_refresh_enabled": False,
     "auto_refresh_interval_minutes": 10,
     "auto_refresh_component_count": 0,
     "last_realtime_attempt_epoch": None,
@@ -87,7 +83,7 @@ for key, value in default_states.items():
 # =========================================================
 
 def add_log(message):
-    now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state.run_log.append(f"[{now}] {message}")
     st.session_state.run_log = st.session_state.run_log[-40:]
 
@@ -247,7 +243,8 @@ def sync_current_db_to_saver(df=None):
         json={
             "hospitals": hospitals,
             "source": "streamlit_runtime",
-            "synced_at": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S"),
+            "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "db_updated_at": st.session_state.last_fetch,
         },
         timeout=30,
     )
@@ -352,7 +349,7 @@ def refresh_realtime_data(trigger="수동"):
         )
 
         st.session_state.hospital_df = df
-        st.session_state.last_fetch = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.last_fetch = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         st.session_state.last_realtime_refresh_epoch = time.time()
         st.session_state.run_status = "실시간 갱신 완료"
         st.session_state.excel_saved = False
