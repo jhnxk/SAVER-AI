@@ -4,11 +4,12 @@ pandas
 numpy
 openpyxl
 requests
+python-dotenv
 flask
 flask-cors
 google-genai
 pydantic
-pulp
+pulp==3.3.2
 google-cloud-speech
 flask-sock
-python-dotenv
+groq
