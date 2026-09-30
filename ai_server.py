@@ -14,6 +14,7 @@ import random
 from datetime import datetime
 from threading import Lock, Thread
 from queue import Queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
@@ -237,20 +238,19 @@ ASSUMED_RETRANSFER_MIN = 30.0
 MIN_EXPECTED_WAIT_MIN = 5.0
 CONGESTION_WAIT_RANGE_MIN = 25.0
 
-# 카카오 다중 목적지 길찾기 API는 한 요청당 최대 30개 목적지를 받는다.
-# 1차 batch에서 카카오 경로가 10개 미만일 때만 2차 batch를 추가로 조회한다.
-# 따라서 추천 요청당 외부 다중 목적지 호출은 최대 2회로 제한한다.
+# 카카오 다중 목적지 길찾기 API는 한 요청당 최대 30개 목적지를 받으므로,
+# Hard Filter 통과 병원 중 직선거리 기준 가까운 30개만 'API 호출 후보'로 사전 축소한다.
+# 이 직선거리는 최종 순위/표시값에 사용하지 않으며, 최종 모델 입력 거리·ETA는 전부 카카오 결과다.
 KAKAO_RANKING_CANDIDATE_LIMIT = 30
-KAKAO_MAX_BATCHES = 2
-KAKAO_TARGET_CONFIRMED_ROUTES = 10
 
 # 동일한 환자 위치에서 A/B/C/D를 비교할 때는 같은 Kakao 거리/ETA를 재사용한다.
-# 다중 목적지 API에서 경로를 받지 못한 후보도 '수용 불가'로 간주하지 않는다.
-# 해당 실패 상태 역시 TTL 동안 캐시하여 모델 전환 때 같은 실패 후보를 반복 호출하지 않고,
-# 그 병원은 아래의 직선거리 기반 보수적 추정값으로 계속 후보에 남겨 둔다.
+# 다중 목적지 API는 radius 최대 10km 제약이 있으므로, 그 범위를 벗어난 후보는
+# 일반 자동차 길찾기 API로 보완한다. 이 캐시는 모델 로직에는 관여하지 않고
+# 동일 location 비교에서 라우팅 입력값만 고정하기 위한 것이다.
 KAKAO_ROUTE_CACHE_TTL_SEC = 15 * 60
 KAKAO_ROUTE_CACHE = {}
 KAKAO_ROUTE_CACHE_LOCK = Lock()
+KAKAO_SINGLE_FALLBACK_WORKERS = 8
 
 TOPSIS_VARIANTS = {
     "C0": {
@@ -2129,13 +2129,13 @@ def _kakao_route_cache_key(origin_lat, origin_lng, destination_lat, destination_
 
 
 def _get_cached_kakao_eta(origin_lat, origin_lng, destination_lat, destination_lng):
-    """같은 출발지/도착지의 성공·실패 라우팅 상태를 TTL 동안 재사용한다."""
     key = _kakao_route_cache_key(origin_lat, origin_lng, destination_lat, destination_lng)
+    now = time.time()
     with KAKAO_ROUTE_CACHE_LOCK:
         item = KAKAO_ROUTE_CACHE.get(key)
         if not item:
             return None
-        if time.time() - float(item.get("cached_at", 0)) > KAKAO_ROUTE_CACHE_TTL_SEC:
+        if now - float(item.get("cached_at", 0)) > KAKAO_ROUTE_CACHE_TTL_SEC:
             KAKAO_ROUTE_CACHE.pop(key, None)
             return None
         return dict(item)
@@ -2145,31 +2145,43 @@ def _set_cached_kakao_eta(origin_lat, origin_lng, destination_lat, destination_l
     key = _kakao_route_cache_key(origin_lat, origin_lng, destination_lat, destination_lng)
     with KAKAO_ROUTE_CACHE_LOCK:
         KAKAO_ROUTE_CACHE[key] = {
-            "kakao_route_ok": True,
             "distance_km": float(distance_km),
             "eta_min": int(eta_min),
             "cached_at": time.time(),
         }
 
 
-def _set_cached_kakao_failure(origin_lat, origin_lng, destination_lat, destination_lng):
-    """다중 목적지에서 확인되지 않은 후보도 잠시 캐시해 모델 전환 시 재요청을 막는다."""
-    key = _kakao_route_cache_key(origin_lat, origin_lng, destination_lat, destination_lng)
-    with KAKAO_ROUTE_CACHE_LOCK:
-        KAKAO_ROUTE_CACHE[key] = {
-            "kakao_route_ok": False,
-            "cached_at": time.time(),
-        }
+def _fetch_single_kakao_eta(origin_lat, origin_lng, destination_lat, destination_lng):
+    """다중 목적지 API에서 반경 초과 등으로 누락된 후보를 일반 자동차 길찾기로 보완한다."""
+    data = call_kakao_route(origin_lat, origin_lng, destination_lat, destination_lng)
+    routes = data.get("routes") or []
+    if not routes:
+        return None
+    route = routes[0] or {}
+    if int(route.get("result_code", 0)) not in (0,):
+        return None
+    summary = route.get("summary") or {}
+    distance_m = to_number(summary.get("distance"))
+    duration_sec = to_number(summary.get("duration"))
+    if distance_m is None or duration_sec is None:
+        return None
+    return {
+        "distance_km": round(float(distance_m) / 1000.0, 2),
+        "eta_min": max(1, int(round(float(duration_sec) / 60.0))),
+    }
 
 
 def call_kakao_multi_destination_eta(hospital_df, ambulance_lat, ambulance_lng):
     """
-    카카오 다중 목적지 API만 사용해 최대 30개 후보의 도로거리/ETA를 조회한다.
+    최대 30개 후보의 Kakao 도로거리/ETA를 확보한다.
 
-    - 성공한 후보는 실제 카카오 거리/ETA를 저장한다.
-    - result_code 실패/반경 초과 후보는 여기서 single directions를 추가 호출하지 않는다.
-    - 성공/실패 모두 TTL 캐시에 저장하므로 같은 위치에서 A/B/C/D를 바꿔도
-      동일 후보에 외부 API를 반복 호출하지 않는다.
+    1) 같은 좌표 조합의 캐시가 있으면 그대로 재사용한다. 따라서 A/B/C/D 전환 시
+       동일한 Kakao 입력값을 사용한다.
+    2) 캐시에 없는 후보는 Kakao 다중 목적지 API로 한 번에 조회한다.
+    3) 다중 목적지 API의 radius(최대 10km) 때문에 result_code=304 등으로 빠진 후보는
+       일반 /v1/directions API로 보완한다.
+
+    모델 A/B/C/D의 산식이나 정렬 기준은 이 함수에서 전혀 변경하지 않는다.
     """
     if hospital_df.empty:
         return hospital_df.copy()
@@ -2184,202 +2196,113 @@ def call_kakao_multi_destination_eta(hospital_df, ambulance_lat, ambulance_lng):
     out["distance_km"] = np.nan
     out["eta_min"] = np.nan
     out["kakao_route_ok"] = False
-    out["routing_source"] = "kakao_unavailable"
+    out["routing_source"] = "kakao_mobility"
 
     uncached = []
     for idx, row in hospital_df.iterrows():
         lat, lng = get_hospital_lat_lng(row)
         if not is_valid_korean_coordinate(lat, lng):
             continue
-
         cached = _get_cached_kakao_eta(ambulance_lat, ambulance_lng, lat, lng)
         if cached is not None:
-            if bool(cached.get("kakao_route_ok")):
-                out.at[idx, "distance_km"] = round(float(cached["distance_km"]), 2)
-                out.at[idx, "eta_min"] = int(cached["eta_min"])
-                out.at[idx, "kakao_route_ok"] = True
-                out.at[idx, "routing_source"] = "kakao_cache"
-            else:
-                out.at[idx, "routing_source"] = "kakao_unavailable_cached"
-            continue
+            out.at[idx, "distance_km"] = round(float(cached["distance_km"]), 2)
+            out.at[idx, "eta_min"] = int(cached["eta_min"])
+            out.at[idx, "kakao_route_ok"] = True
+            out.at[idx, "routing_source"] = "kakao_cache"
+        else:
+            uncached.append((idx, float(lat), float(lng)))
 
-        uncached.append((idx, float(lat), float(lng)))
+    # 먼저 다중 목적지 API를 사용한다. 이 API는 최대 30개지만 radius 최대 10km 제약이 있다.
+    if uncached:
+        destinations = []
+        key_to_item = {}
+        for pos, (idx, lat, lng) in enumerate(uncached):
+            key = str(pos)
+            destinations.append({"key": key, "x": lng, "y": lat})
+            key_to_item[key] = (idx, lat, lng)
 
-    if not uncached:
-        return out
-
-    destinations = []
-    key_to_item = {}
-    for pos, (idx, lat, lng) in enumerate(uncached):
-        key = str(pos)
-        destinations.append({"key": key, "x": lng, "y": lat})
-        key_to_item[key] = (idx, lat, lng)
-
-    response = requests.post(
-        "https://apis-navi.kakaomobility.com/v1/destinations/directions",
-        headers={
-            "Authorization": f"KakaoAK {KAKAO_REST_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "origin": {"x": float(ambulance_lng), "y": float(ambulance_lat)},
-            "destinations": destinations,
-            "radius": 10000,
-            "priority": "TIME",
-            "roadevent": 0,
-        },
-        timeout=KAKAO_REQUEST_TIMEOUT_SEC,
-    )
-
-    try:
-        data = response.json()
-    except Exception:
-        data = {"raw": response.text[:1000]}
-
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"카카오모빌리티 다중 목적지 ETA 조회 실패 (HTTP {response.status_code}): {data}"
+        response = requests.post(
+            "https://apis-navi.kakaomobility.com/v1/destinations/directions",
+            headers={
+                "Authorization": f"KakaoAK {KAKAO_REST_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "origin": {"x": float(ambulance_lng), "y": float(ambulance_lat)},
+                "destinations": destinations,
+                "radius": 10000,
+                "priority": "TIME",
+                "roadevent": 0,
+            },
+            timeout=KAKAO_REQUEST_TIMEOUT_SEC,
         )
 
-    route_by_key = {str(route.get("key")): route for route in (data.get("routes") or [])}
-    for key, (idx, lat, lng) in key_to_item.items():
-        route = route_by_key.get(key) or {}
-        if int(route.get("result_code", -1)) != 0:
-            _set_cached_kakao_failure(ambulance_lat, ambulance_lng, lat, lng)
-            continue
-
-        summary = route.get("summary") or {}
-        distance_m = to_number(summary.get("distance"))
-        duration_sec = to_number(summary.get("duration"))
-        if distance_m is None or duration_sec is None:
-            _set_cached_kakao_failure(ambulance_lat, ambulance_lng, lat, lng)
-            continue
-
-        distance_km = round(float(distance_m) / 1000.0, 2)
-        eta_min = max(1, int(round(float(duration_sec) / 60.0)))
-        out.at[idx, "distance_km"] = distance_km
-        out.at[idx, "eta_min"] = eta_min
-        out.at[idx, "kakao_route_ok"] = True
-        out.at[idx, "routing_source"] = "kakao_multi_destination"
-        _set_cached_kakao_eta(
-            ambulance_lat,
-            ambulance_lng,
-            lat,
-            lng,
-            distance_km,
-            eta_min,
-        )
-
-    return out
-
-
-def _attach_estimated_route_fallback(hospital_df, ambulance_lat, ambulance_lng):
-    """
-    Kakao 다중 목적지 결과가 없는 병원도 후보에서 제거하지 않는다.
-
-    해당 병원은 기존 SAVER의 직선거리→도로거리 보정/평균속도 ETA 추정값을 사용하며,
-    routing_source='estimated_fallback'으로 명확히 표시한다.
-    """
-    if hospital_df.empty:
-        return hospital_df.copy()
-
-    out = hospital_df.copy()
-    if "distance_km" not in out.columns:
-        out["distance_km"] = np.nan
-    if "eta_min" not in out.columns:
-        out["eta_min"] = np.nan
-    if "kakao_route_ok" not in out.columns:
-        out["kakao_route_ok"] = False
-    if "routing_source" not in out.columns:
-        out["routing_source"] = "kakao_unavailable"
-
-    for idx, row in out.iterrows():
-        if bool(row.get("kakao_route_ok")):
-            continue
-
-        distance_km, eta_min = compute_distance_and_eta(row, ambulance_lat, ambulance_lng)
-        if distance_km is None or eta_min is None:
-            continue
-
-        out.at[idx, "distance_km"] = distance_km
-        out.at[idx, "eta_min"] = eta_min
-        out.at[idx, "routing_source"] = "estimated_fallback"
-
-    return out
-
-
-def _prepare_routing_candidates_two_batches(
-    acceptable_df,
-    ambulance_lat,
-    ambulance_lng,
-    target_confirmed=KAKAO_TARGET_CONFIRMED_ROUTES,
-):
-    """
-    Hard Filter 통과 병원 중 가까운 후보를 최대 2개 batch로 조회한다.
-
-    1차 batch(최대 30개)에서 실제 Kakao 경로가 target_confirmed개 이상 확보되면 종료한다.
-    부족할 때만 다음 30개를 2차 batch로 조회한다.
-    각 batch의 Kakao 누락 후보는 제거하지 않고 추정 거리/ETA를 붙인다.
-    """
-    if acceptable_df.empty:
-        return acceptable_df.copy(), 0, 0
-
-    # 기존 _preselect_kakao_candidates와 동일한 직선거리 사전선별 규칙을 사용하되,
-    # 최대 2 batch 분량까지 한 번만 정렬한다.
-    df = acceptable_df.copy()
-    preselect_distances = []
-    for _, row in df.iterrows():
-        hosp_lat, hosp_lng = get_hospital_lat_lng(row)
-        if not is_valid_korean_coordinate(hosp_lat, hosp_lng):
-            preselect_distances.append(float("inf"))
-            continue
-        distance = haversine_km(ambulance_lat, ambulance_lng, hosp_lat, hosp_lng)
-        preselect_distances.append(float(distance) if distance is not None else float("inf"))
-
-    df["_kakao_preselect_distance"] = preselect_distances
-    finite_mask = np.isfinite(pd.to_numeric(df["_kakao_preselect_distance"], errors="coerce"))
-    df = df[finite_mask].copy()
-    df = df.sort_values("_kakao_preselect_distance", ascending=True, kind="mergesort")
-
-    max_candidates = KAKAO_RANKING_CANDIDATE_LIMIT * KAKAO_MAX_BATCHES
-    df = df.head(max_candidates).drop(columns=["_kakao_preselect_distance"], errors="ignore")
-
-    routed_batches = []
-    confirmed_count = 0
-    batch_count = 0
-
-    for batch_no in range(KAKAO_MAX_BATCHES):
-        start = batch_no * KAKAO_RANKING_CANDIDATE_LIMIT
-        end = start + KAKAO_RANKING_CANDIDATE_LIMIT
-        batch = df.iloc[start:end].copy()
-        if batch.empty:
-            break
-
-        # 2차 batch는 1차에서 실제 Kakao 경로가 충분하지 않을 때만 호출한다.
-        if batch_no > 0 and confirmed_count >= min(int(target_confirmed), len(df)):
-            break
-
-        batch_count += 1
         try:
-            routed = call_kakao_multi_destination_eta(batch, ambulance_lat, ambulance_lng)
-        except Exception as exc:
-            print(f"KAKAO MULTI BATCH ERROR batch={batch_no + 1}: {exc}")
-            routed = batch.copy()
-            routed["distance_km"] = np.nan
-            routed["eta_min"] = np.nan
-            routed["kakao_route_ok"] = False
-            routed["routing_source"] = "kakao_batch_error"
+            data = response.json()
+        except Exception:
+            data = {"raw": response.text[:1000]}
 
-        confirmed_count += int(pd.Series(routed["kakao_route_ok"]).fillna(False).astype(bool).sum())
-        routed = _attach_estimated_route_fallback(routed, ambulance_lat, ambulance_lng)
-        routed_batches.append(routed)
+        if response.status_code >= 400:
+            raise RuntimeError(f"카카오모빌리티 다중 목적지 ETA 조회 실패 (HTTP {response.status_code}): {data}")
 
-    if not routed_batches:
-        return acceptable_df.head(0).copy(), 0, 0
+        route_by_key = {str(route.get("key")): route for route in (data.get("routes") or [])}
+        for key, (idx, lat, lng) in key_to_item.items():
+            route = route_by_key.get(key) or {}
+            if int(route.get("result_code", -1)) != 0:
+                continue
+            summary = route.get("summary") or {}
+            distance_m = to_number(summary.get("distance"))
+            duration_sec = to_number(summary.get("duration"))
+            if distance_m is None or duration_sec is None:
+                continue
+            distance_km = round(float(distance_m) / 1000.0, 2)
+            eta_min = max(1, int(round(float(duration_sec) / 60.0)))
+            out.at[idx, "distance_km"] = distance_km
+            out.at[idx, "eta_min"] = eta_min
+            out.at[idx, "kakao_route_ok"] = True
+            out.at[idx, "routing_source"] = "kakao_multi_destination"
+            _set_cached_kakao_eta(ambulance_lat, ambulance_lng, lat, lng, distance_km, eta_min)
 
-    combined = pd.concat(routed_batches, axis=0)
-    combined = combined[~combined.index.duplicated(keep="first")].copy()
-    return combined, confirmed_count, batch_count
+    # 다중 목적지에서 실패한 후보(주로 radius 10km 초과)는 일반 자동차 길찾기로 보완한다.
+    fallback_items = []
+    for idx, row in hospital_df.iterrows():
+        if bool(out.at[idx, "kakao_route_ok"]):
+            continue
+        lat, lng = get_hospital_lat_lng(row)
+        if is_valid_korean_coordinate(lat, lng):
+            fallback_items.append((idx, float(lat), float(lng)))
+
+    if fallback_items:
+        def _job(item):
+            idx, lat, lng = item
+            try:
+                result = _fetch_single_kakao_eta(ambulance_lat, ambulance_lng, lat, lng)
+                return idx, lat, lng, result, None
+            except Exception as exc:
+                return idx, lat, lng, None, exc
+
+        with ThreadPoolExecutor(max_workers=min(KAKAO_SINGLE_FALLBACK_WORKERS, len(fallback_items))) as executor:
+            futures = [executor.submit(_job, item) for item in fallback_items]
+            for future in as_completed(futures):
+                idx, lat, lng, result, error = future.result()
+                if result is None:
+                    if error is not None:
+                        print(f"KAKAO SINGLE FALLBACK ERROR idx={idx}: {error}")
+                    continue
+                out.at[idx, "distance_km"] = result["distance_km"]
+                out.at[idx, "eta_min"] = result["eta_min"]
+                out.at[idx, "kakao_route_ok"] = True
+                out.at[idx, "routing_source"] = "kakao_single_fallback"
+                _set_cached_kakao_eta(
+                    ambulance_lat,
+                    ambulance_lng,
+                    lat,
+                    lng,
+                    result["distance_km"],
+                    result["eta_min"],
+                )
+
+    return out
 
 
 def attach_model_feature_fields(hospital_df, patient=None, as_of=None):
@@ -2654,74 +2577,6 @@ def apply_ranking_model(model_key, acceptable_df, patient=None, topsis_variant=D
     if not ranked.empty and "model_score" in ranked.columns:
         ranked = ranked.sort_values("model_score", ascending=False, kind="mergesort").reset_index(drop=True)
     return ranked, applied
-
-
-def apply_golden_time_safety_priority(ranked_df, patient=None):
-    """
-    응급의료 시스템 공통 안전 우선순위.
-
-    A/B/C/D의 내부 계산식과 각 모델이 만든 원래 순서는 그대로 둔 채,
-    환자의 golden_time_min 안에 도착 가능한 병원을 먼저 배치한다.
-
-    - ETA <= golden_time: 골든타임 내
-    - ETA >  golden_time: 골든타임 초과
-    - ETA 미확인: ETA 미확인
-
-    최종 화면의 '추천 점수'와 순위가 다시 어긋나지 않도록,
-    원래 모델 점수는 model_score_native에 보존하고 화면용 model_score만
-    안전 우선순위를 보존하는 단조 점수로 다시 만든다.
-    모델 고유 원시값(model_score_raw / topsis_closeness / milp_utility_score 등)은 변경하지 않는다.
-    """
-    if ranked_df.empty:
-        return ranked_df.copy(), False
-
-    patient = patient or {}
-    golden_time = to_number(patient.get("golden_time_min"))
-    if golden_time is None or golden_time <= 0 or "eta_min" not in ranked_df.columns:
-        out = ranked_df.copy()
-        out["golden_time_status"] = "미적용"
-        out["golden_time_exceeded"] = False
-        return out, False
-
-    out = ranked_df.copy().reset_index(drop=True)
-    eta = pd.to_numeric(out["eta_min"], errors="coerce")
-
-    # 모델 자체가 만든 순서를 동일 그룹 안의 2차 기준으로 그대로 보존한다.
-    out["_native_model_order"] = np.arange(len(out), dtype=int)
-    out["model_score_native"] = pd.to_numeric(out.get("model_score"), errors="coerce")
-
-    within = eta.notna() & (eta <= float(golden_time))
-    over = eta.notna() & (eta > float(golden_time))
-
-    out["golden_time_status"] = np.select(
-        [within, over],
-        ["골든타임 내", "골든타임 초과"],
-        default="ETA 미확인",
-    )
-    out["golden_time_exceeded"] = over
-
-    # 0: 골든타임 내, 1: 초과, 2: ETA 미확인
-    # 외부 교통 API가 실패했다고 병원을 탈락시키지는 않되, 확인 가능한 안전 후보를 먼저 보여준다.
-    out["_golden_priority"] = np.select([within, over], [0, 1], default=2).astype(int)
-    out = out.sort_values(
-        by=["_golden_priority", "_native_model_order"],
-        ascending=[True, True],
-        kind="mergesort",
-    ).reset_index(drop=True)
-
-    # 안전 우선순위 적용 후에도 화면 점수가 최종 순서와 일치하도록 표시용 점수만 재매핑한다.
-    # 각 안전 그룹 내부에서는 기존 모델 점수의 순서를 그대로 유지한다.
-    native_score = pd.to_numeric(out["model_score_native"], errors="coerce")
-    native_norm = _normalize_series(native_score.fillna(0), higher_is_better=True)
-    priority_bonus = (2 - out["_golden_priority"]) * 2.0
-    safety_key = priority_bonus + native_norm
-    out["model_score"] = (_normalize_series(safety_key, higher_is_better=True) * 100.0).round(2)
-
-    if "model_score_label" in out.columns:
-        out["model_score_label"] = out["model_score_label"].astype(str) + " · 골든타임 우선"
-
-    out = out.drop(columns=["_golden_priority", "_native_model_order"])
-    return out, True
 
 
 
@@ -4544,30 +4399,27 @@ def recommend_hospitals_api():
         acceptable_all_df, rejected_df, result_df = filter_acceptable_hospitals(hospital_df, patient)
 
         # Hard Filter 통과 수는 전체 후보 기준으로 유지한다.
-        # 미확인(U)은 기존 로직대로 수용 가능 후보에 남고,
-        # 명확한 불충족(N)만 rejected_df(수용 불가)로 분리된다.
         hard_filter_acceptable_count = len(acceptable_all_df)
 
-        # 추천 후보의 라우팅은 Kakao 다중 목적지 최대 1~2 batch로 제한한다.
-        # Kakao에서 특정 병원을 받지 못해도 그 병원을 제거하지 않고 추정값으로 유지한다.
-        model_candidate_df, kakao_confirmed_count, routing_batch_count = (
-            _prepare_routing_candidates_two_batches(
-                acceptable_all_df,
-                ambulance_lat,
-                ambulance_lng,
-                target_confirmed=KAKAO_TARGET_CONFIRMED_ROUTES,
-            )
+        # 카카오 다중 목적지 API 한도(30개) 때문에, Hard Filter 후 가까운 후보만 API 호출 대상으로 축소한다.
+        # 이 사전 축소에 쓰는 직선거리는 최종 순위/표시값에 절대 사용하지 않는다.
+        kakao_candidates = _preselect_kakao_candidates(
+            acceptable_all_df,
+            ambulance_lat,
+            ambulance_lng,
+            limit=KAKAO_RANKING_CANDIDATE_LIMIT,
         )
+        if kakao_candidates.empty:
+            raise RuntimeError("Hard Filter 통과 병원 중 카카오 경로를 조회할 수 있는 좌표가 없습니다.")
 
-        if model_candidate_df.empty and not acceptable_all_df.empty:
-            # Hard Filter는 통과했지만 병원 좌표가 전부 비어 있는 경우에도
-            # 의료적으로 수용 가능한 병원을 API 오류처럼 숨기지 않는다.
-            # 거리/ETA는 미확인 상태로 두고 기존 모델의 나머지 기준으로 순위를 계산한다.
-            model_candidate_df = acceptable_all_df.copy()
-            model_candidate_df["distance_km"] = np.nan
-            model_candidate_df["eta_min"] = np.nan
-            model_candidate_df["kakao_route_ok"] = False
-            model_candidate_df["routing_source"] = "coordinate_unavailable"
+        kakao_candidates = call_kakao_multi_destination_eta(
+            kakao_candidates,
+            ambulance_lat,
+            ambulance_lng,
+        )
+        model_candidate_df = kakao_candidates[kakao_candidates["kakao_route_ok"] == True].copy()
+        if model_candidate_df.empty:
+            raise RuntimeError("카카오모빌리티에서 유효한 병원 거리/ETA 결과를 받지 못했습니다.")
 
         model_candidate_df = attach_model_feature_fields(model_candidate_df, patient=patient)
 
@@ -4577,25 +4429,47 @@ def recommend_hospitals_api():
             patient=patient,
             topsis_variant=topsis_variant,
         )
-
-        # A/B/C/D의 내부 로직은 그대로 두고, 시스템 공통 안전장치로
-        # 골든타임 내 도착 가능한 병원을 우선 배치한다.
-        ranked_acceptable_df, golden_time_safety_applied = apply_golden_time_safety_priority(
-            ranked_acceptable_df,
-            patient=patient,
-        )
-
-        # 추천 목록은 수용 가능 후보만 최대 10개 표시한다.
-        # 10개가 부족하더라도 명확한 불충족 병원을 숫자 채우기용으로 올리지 않는다.
         top_acceptable_df = ranked_acceptable_df.head(10).copy()
-        top_result_df = top_acceptable_df.copy()
 
-        # 수용 불가 병원은 추천 10개에 섞지 않고 기존 '수용 불가' 탭에서 별도로 보여준다.
-        # 여기서는 외부 Kakao API를 추가 호출하지 않는다.
-        rejected_display_df = rejected_df.copy()
+        # 수용 가능 병원이 10개 미만일 때만 수용 불가 병원을 보조 표시한다.
+        # 표시되는 ETA/거리는 이 경우에도 근사값을 쓰지 않고 카카오 결과만 사용한다.
+        needed_rejected = max(0, 10 - len(top_acceptable_df))
+        if needed_rejected > 0 and not rejected_df.empty:
+            rejected_candidates = _preselect_kakao_candidates(
+                rejected_df,
+                ambulance_lat,
+                ambulance_lng,
+                limit=min(KAKAO_RANKING_CANDIDATE_LIMIT, needed_rejected),
+            )
+            if not rejected_candidates.empty:
+                try:
+                    rejected_candidates = call_kakao_multi_destination_eta(
+                        rejected_candidates,
+                        ambulance_lat,
+                        ambulance_lng,
+                    )
+                    rejected_candidates = attach_model_feature_fields(rejected_candidates, patient=patient)
+                    top_rejected_df = rejected_candidates.sort_values(
+                        by=["distance_km"], ascending=[True], kind="mergesort", na_position="last"
+                    ).head(needed_rejected).copy()
+                except Exception as rejected_route_error:
+                    print("KAKAO REJECTED DISPLAY ROUTE ERROR:", rejected_route_error)
+                    top_rejected_df = rejected_candidates.head(needed_rejected).copy()
+                    top_rejected_df["distance_km"] = np.nan
+                    top_rejected_df["eta_min"] = np.nan
+                    top_rejected_df["routing_source"] = "kakao_unavailable"
+            else:
+                top_rejected_df = rejected_df.head(0).copy()
+        else:
+            top_rejected_df = rejected_df.head(0).copy()
 
-        # 전체 Hard Filter 통과 집합에 ETA 컬럼을 만들어 성능지표의 분모는 전체 통과 수로 유지한다.
-        # ETA는 Kakao가 확보된 후보는 실제값, 미확보 후보는 명시적인 추정값을 사용한다.
+        if not top_rejected_df.empty:
+            top_result_df = pd.concat([top_acceptable_df, top_rejected_df], ignore_index=True)
+        else:
+            top_result_df = top_acceptable_df
+
+        # 전체 Hard Filter 통과 집합에 ETA 컬럼을 만들어 성능지표의 분모는 전체 통과 수로 유지하되,
+        # ETA 통계는 실제 카카오 경로가 확보된 후보만 대상으로 계산되게 한다.
         acceptable_metrics_df = acceptable_all_df.copy()
         acceptable_metrics_df["eta_min"] = np.nan
         if not model_candidate_df.empty:
@@ -4624,22 +4498,15 @@ def recommend_hospitals_api():
             "acceptable_count": hard_filter_acceptable_count,
             "rejected_count": len(rejected_df),
             "model_candidate_count": len(model_candidate_df),
-            "kakao_confirmed_count": int(kakao_confirmed_count),
-            "estimated_route_count": int(
-                (model_candidate_df.get("routing_source", pd.Series(dtype=str)) == "estimated_fallback").sum()
-            ),
-            "routing_batch_count": int(routing_batch_count),
-            "golden_time_safety_applied": bool(golden_time_safety_applied),
-            "golden_time_min": to_number(patient.get("golden_time_min")),
             "display_acceptable_count": len(top_acceptable_df),
-            "display_rejected_count": len(rejected_display_df),
+            "display_rejected_count": len(top_rejected_df),
             "acceptable_hospitals": dataframe_to_records(top_acceptable_df),
-            "rejected_hospitals": dataframe_to_records(rejected_display_df),
+            "rejected_hospitals": dataframe_to_records(top_rejected_df),
             "all_results": dataframe_to_records(top_result_df),
             "applied_model": {**MODEL_INFO[applied_model_key], "key": applied_model_key},
             "ambulance_location": {"lat": ambulance_lat, "lng": ambulance_lng},
             "performance_metrics": performance_metrics,
-            "routing_source": "kakao_multi_with_estimated_fallback",
+            "routing_source": "kakao_mobility_multi_destination",
             "db_updated_at": runtime_meta.get("db_updated_at"),
             "db_synced_at": runtime_meta.get("synced_at"),
         }
