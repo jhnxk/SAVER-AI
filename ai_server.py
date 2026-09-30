@@ -1,25 +1,10 @@
-import json
 import os
-from tempfile import NamedTemporaryFile
 
-# ---------------------------------------------------------
-# Render 등 클라우드 배포 환경용 Google Cloud STT 인증 설정
-# ---------------------------------------------------------
-google_json_str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-if google_json_str:
-    # Render 환경변수(GOOGLE_APPLICATION_CREDENTIALS_JSON)의 JSON 문자열을
-    # 임시 .json 파일로 저장하여 Google SDK가 인식할 수 있도록 경로를 설정합니다.
-    temp_key_file = NamedTemporaryFile(delete=False, suffix=".json")
-    temp_key_file.write(google_json_str.encode("utf-8"))
-    temp_key_file.close()
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_key_file.name
-
-
-from dotenv import load_dotenv #깃허브에선 지움
+from dotenv import load_dotenv
 
 # .env를 Google/gRPC 라이브러리 import 전에 읽어 DNS resolver 설정이
 # 실시간 STT 채널 생성에도 확실히 적용되도록 한다.
-load_dotenv() #깃허브에선 지움
+load_dotenv()
 os.environ.setdefault("GRPC_DNS_RESOLVER", "native")
 
 import math
@@ -38,14 +23,13 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_sock import Sock
 
-from google import genai
-from google.genai import types
+from groq import Groq
 import google.auth
 from google.cloud import speech_v2
 from google.cloud.speech_v2.types import cloud_speech
 from google.api_core.client_options import ClientOptions
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
 
 # MILP(Model B)용. requirements.txt에 pulp가 없으면 자동으로
@@ -61,18 +45,10 @@ except ImportError:
 # 1. 환경변수 및 Flask 설정
 # =========================================================
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
-GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
-
-# 여러 개의 Gemini API 키를 순환 사용하기 위한 설정.
-# .env에 GEMINI_API_KEYS="키1,키2,키3,키4" 처럼 콤마로 구분해서 넣으면 된다.
-# GEMINI_API_KEYS가 없으면 기존 GEMINI_API_KEY 하나만 사용(하위 호환).
-GEMINI_API_KEYS = [
-    key.strip()
-    for key in os.getenv("GEMINI_API_KEYS", "").split(",")
-    if key.strip()
-] or ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+# 환자 상태 구조화용 LLM은 Groq API의 GPT-OSS 120B를 사용한다.
+# 무료 API 사용량 보호를 위해 SDK 자동 재시도는 사용하지 않는다.
+GROQ_API_KEY = str(os.getenv("GROQ_API_KEY") or "").strip()
+GROQ_MODEL = str(os.getenv("GROQ_MODEL") or "openai/gpt-oss-120b").strip()
 
 # Google Cloud Speech-to-Text V2 설정.
 # GOOGLE_CLOUD_PROJECT가 .env에 없으면 gcloud ADC에서 프로젝트 ID를 자동 탐지한다.
@@ -85,7 +61,7 @@ GOOGLE_STT_MAX_AUDIO_BYTES = 10 * 1024 * 1024
 GOOGLE_STT_MAX_RECORDING_SEC = 30
 
 # 응급의료 도메인 용어. Cloud Speech-to-Text model adaptation의 inline PhraseSet에만 사용한다.
-# 병원 추천/Gemini 환자 분석 로직에는 영향을 주지 않는다.
+# 병원 추천/LLM 환자 분석 로직에는 영향을 주지 않는다.
 GOOGLE_STT_MEDICAL_PHRASES = [
     "말이 어눌하다",
     "말이 어눌해지고",
@@ -207,15 +183,22 @@ def _google_stt_adaptation_phrase_count():
         + len(GOOGLE_STT_DEMOGRAPHIC_PHRASES)
     )
 
-if not GEMINI_API_KEYS:
-    raise ValueError("GEMINI_API_KEY(또는 GEMINI_API_KEYS)가 .env에 없습니다.")
+if not GROQ_API_KEY:
+    raise ValueError(
+        "Groq API 키가 .env에 없습니다. GROQ_API_KEY를 설정해 주세요."
+    )
 
-# 키마다 하나씩 클라이언트를 미리 만들어두고, 쿼터 초과 시 다음 클라이언트로 순환한다.
-_gemini_clients = [genai.Client(api_key=key) for key in GEMINI_API_KEYS]
-_gemini_key_index = 0
-_gemini_key_lock = Lock()
+# Groq Python SDK는 일부 오류를 기본적으로 자동 재시도하므로 명시적으로 끈다.
+# 동일 환자 입력은 아래 PatientInfo 캐시를 통해 재사용한다.
+GROQ_CLIENT = Groq(
+    api_key=GROQ_API_KEY,
+    max_retries=0,
+)
 
-print(f"[GEMINI] {len(_gemini_clients)}개의 API 키를 순환 사용합니다.")
+print(
+    f"[GROQ] 환자 상태 구조화 모델={GROQ_MODEL}, "
+    "reasoning_effort=medium, strict structured output=ON, SDK 자동 재시도=OFF"
+)
 
 app = Flask(__name__, static_folder=".")
 CORS(app)
@@ -224,7 +207,7 @@ sock = Sock(app)
 # Streamlit에서 Excel 저장 없이 넘겨받는 최신 병원 DB.
 # Flask가 재시작되면 사라지고, 그때는 아래 기존 Excel fallback 로직을 그대로 사용한다.
 RUNTIME_HOSPITAL_DF = None
-RUNTIME_HOSPITAL_META = {"source": None, "synced_at": None}
+RUNTIME_HOSPITAL_META = {"source": None, "synced_at": None, "db_updated_at": None}
 RUNTIME_DB_LOCK = Lock()
 
 # 프론트에서 GPS 위치를 못 받아왔을 때 사용하는 기본 위치(대전광역시청).
@@ -236,11 +219,6 @@ DEFAULT_AMBULANCE_LNG = 127.3845
 # .env에 KAKAO_REST_API_KEY가 있어야 실제 도로 경로/실시간 교통 ETA를 조회할 수 있다.
 KAKAO_REST_API_KEY = os.getenv("KAKAO_REST_API_KEY")
 KAKAO_JAVASCRIPT_KEY = os.getenv("KAKAO_JAVASCRIPT_KEY")
-
-# "병원 DB 관리" 버튼이 이동할 Streamlit(app.py) 주소.
-# Render처럼 서로 다른 도메인에 배포된 환경에서는 localhost로는 접근할 수 없으므로
-# .env에 실제 배포 주소(예: https://saver-ai-1.onrender.com)를 넣어줘야 한다.
-STREAMLIT_DB_MANAGER_URL = os.getenv("STREAMLIT_DB_MANAGER_URL", "http://localhost:8501")
 KAKAO_REQUEST_TIMEOUT_SEC = 15
 
 # 환자 위치 랜덤 생성 범위. 지도팀 코드의 전국 시연용 반경과 같은 의미다.
@@ -251,11 +229,28 @@ PATIENT_MAX_RADIUS_KM = 5.0
 # 실제 병원 시스템 연동 API가 준비되기 전까지는 이 파일이 "전송 기록"의 역할을 한다.
 DISPATCH_LOG_FILE = "dispatch_log.jsonl"
 
-# 실제 거절/재이송 이력이 쌓이기 전까지 사용하는 보수적 프록시 가정치.
+
+# 개선 ver_0920의 Model B/C 계산에 필요한 보수적 프록시/설정.
+# 실제 거절·재이송 이력이 쌓이기 전까지 사용하는 추정치이며 학습된 확률이 아니다.
 ASSUMED_REJECTION_RESEARCH_MIN = 20.0
 ASSUMED_RETRANSFER_MIN = 30.0
 MIN_EXPECTED_WAIT_MIN = 5.0
 CONGESTION_WAIT_RANGE_MIN = 25.0
+
+# 카카오 다중 목적지 길찾기 API는 한 요청당 최대 30개 목적지를 받는다.
+# 1차 batch에서 카카오 경로가 10개 미만일 때만 2차 batch를 추가로 조회한다.
+# 따라서 추천 요청당 외부 다중 목적지 호출은 최대 2회로 제한한다.
+KAKAO_RANKING_CANDIDATE_LIMIT = 30
+KAKAO_MAX_BATCHES = 2
+KAKAO_TARGET_CONFIRMED_ROUTES = 10
+
+# 동일한 환자 위치에서 A/B/C/D를 비교할 때는 같은 Kakao 거리/ETA를 재사용한다.
+# 다중 목적지 API에서 경로를 받지 못한 후보도 '수용 불가'로 간주하지 않는다.
+# 해당 실패 상태 역시 TTL 동안 캐시하여 모델 전환 때 같은 실패 후보를 반복 호출하지 않고,
+# 그 병원은 아래의 직선거리 기반 보수적 추정값으로 계속 후보에 남겨 둔다.
+KAKAO_ROUTE_CACHE_TTL_SEC = 15 * 60
+KAKAO_ROUTE_CACHE = {}
+KAKAO_ROUTE_CACHE_LOCK = Lock()
 
 TOPSIS_VARIANTS = {
     "C0": {
@@ -272,7 +267,7 @@ TOPSIS_VARIANTS = {
     },
     "C1": {
         "label": "보수적 개선형",
-        "description": "서로 중복이 적은 ETA, 혼잡도, 전문치료 여유도, 데이터 신뢰도를 고정 가중치로 평가합니다.",
+        "description": "ETA, 혼잡도, 전문치료 여유도, 데이터 신뢰도를 고정 가중치로 평가합니다.",
         "patient_aware": False,
         "experimental": False,
         "criteria": {
@@ -284,7 +279,7 @@ TOPSIS_VARIANTS = {
     },
     "C2": {
         "label": "환자 맞춤형",
-        "description": "C1과 동일한 기준을 사용하되 KTAS/골든타임에 따라 가중치만 변경합니다.",
+        "description": "C1과 동일한 기준을 사용하되 KTAS/골든타임에 따라 가중치를 변경합니다.",
         "patient_aware": True,
         "experimental": False,
         "criteria_from": "C1",
@@ -314,31 +309,37 @@ TOPSIS_VARIANTS = {
         },
     },
 }
-
 DEFAULT_TOPSIS_VARIANT = "C1"
+
+# 같은 환자 문장을 A/B/C/D 비교에서 반복 분석하지 않기 위한 메모리 캐시.
+# Flask 재시작 시 자동으로 비워지며, 환자 문장이 달라지면 새 Groq 분석을 수행한다.
+PATIENT_ANALYSIS_CACHE = {}
+PATIENT_ANALYSIS_CACHE_LOCK = Lock()
+PATIENT_ANALYSIS_CACHE_MAX = 100
 
 MODEL_INFO = {
     "A": {
         "name": "Model A",
         "label": "가장 가까운 병원 추천",
-        "description": "수용 가능 판정을 통과한 병원 중 구급차 현재 위치에서 직선거리가 가장 가까운 병원 순으로 정렬합니다.",
+        "description": "Hard Filter 통과 후 카카오 실제 도로거리/ETA를 확보한 후보 중 도로거리가 가까운 순으로 정렬합니다.",
     },
     "B": {
         "name": "Model B",
         "label": "MILP 혼합정수선형계획",
-        "description": "예상 치료시작 지연, 임상 적합성, 정보 신뢰도와 골든타임 위반을 반영합니다. 다중 환자 API에서는 병상 용량까지 동시에 최적화합니다.",
+        "description": "카카오 ETA를 포함한 예상 치료시작 지연, 임상 적합성, 정보 신뢰도와 골든타임 위반을 반영합니다.",
     },
     "C": {
         "name": "Model C",
         "label": "TOPSIS 다기준 의사결정",
-        "description": "동일한 후보 병원과 공통 TOPSIS 엔진으로 C0/C1/C2/C3 변형을 비교합니다. 기본값은 독립적 기준을 사용하는 C1입니다.",
+        "description": "공통 TOPSIS 엔진으로 C0/C1/C2/C3 변형을 비교하며 기본값은 C1입니다. ETA/거리 기준은 카카오 경로값을 사용합니다.",
     },
     "D": {
         "name": "Model D",
         "label": "가중치 종합 점수",
-        "description": "수용점수, 이동거리, 전문의 수, 병원 혼잡도를 0~1로 정규화한 뒤 사전에 정의한 가중치로 합산한 종합 점수 순으로 정렬합니다.",
+        "description": "수용점수, 카카오 도로거리, 전문의 수, 병원 혼잡도를 정규화한 뒤 사전 정의 가중치로 합산합니다.",
     },
 }
+
 
 
 # =========================================================
@@ -346,6 +347,8 @@ MODEL_INFO = {
 # =========================================================
 
 class PatientInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     suspected_category: str
     ktas: int
     golden_time_min: int
@@ -499,6 +502,7 @@ def sync_hospitals_runtime_api():
                     data.get("synced_at")
                     or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 ),
+                "db_updated_at": data.get("db_updated_at"),
             }
 
         print(
@@ -514,6 +518,7 @@ def sync_hospitals_runtime_api():
                 "column_count": len(df.columns),
                 "source": RUNTIME_HOSPITAL_META["source"],
                 "synced_at": RUNTIME_HOSPITAL_META["synced_at"],
+                "db_updated_at": RUNTIME_HOSPITAL_META.get("db_updated_at"),
             }
         )
 
@@ -524,6 +529,21 @@ def sync_hospitals_runtime_api():
             "error": str(e)
         }), 500
 
+
+
+
+@app.route("/api/runtime-db-status", methods=["GET"] )
+def runtime_db_status_api():
+    with RUNTIME_DB_LOCK:
+        meta = dict(RUNTIME_HOSPITAL_META)
+        hospital_count = 0 if RUNTIME_HOSPITAL_DF is None else len(RUNTIME_HOSPITAL_DF)
+    return jsonify({
+        "success": True,
+        "hospital_count": hospital_count,
+        "source": meta.get("source"),
+        "synced_at": meta.get("synced_at"),
+        "db_updated_at": meta.get("db_updated_at"),
+    })
 
 def to_json_safe(value):
     if value is None:
@@ -737,7 +757,7 @@ def transcribe_audio_api():
     Google Cloud STT로 전사한다.
 
     음성 전사 기능만 담당하며
-    Gemini 분석/병원 추천/지도 로직은 호출하지 않는다.
+    LLM 분석/병원 추천/지도 로직은 호출하지 않는다.
     """
 
     try:
@@ -1047,222 +1067,129 @@ def transcribe_streaming_ws(ws):
 
 
 # =========================================================
-# 4. Gemini 환자 상태 분석
+# 4. Groq GPT-OSS 기반 환자 상태 분석
 # =========================================================
 
-def _is_gemini_503(error):
-    """Gemini의 일시적 서버 과부하/UNAVAILABLE(503)인지 보수적으로 판별한다."""
-    for attr in ("code", "status_code", "status"):
+def _groq_status_code(error):
+    """Groq SDK 예외에서 HTTP status code를 가능한 범위에서 추출한다."""
+    for attr in ("status_code", "code", "status"):
         value = getattr(error, attr, None)
-        if value == 503 or str(value).strip() == "503":
-            return True
-
-    message = str(error).upper()
-    return (
-        "503" in message
-        and ("UNAVAILABLE" in message or "HIGH DEMAND" in message)
-    )
-
-
-def _is_gemini_quota_exceeded(error):
-    """무료 API 키의 사용량(쿼터)을 다 써서 나는 429/RESOURCE_EXHAUSTED 오류인지 판별한다."""
-    for attr in ("code", "status_code", "status"):
-        value = getattr(error, attr, None)
-        if value == 429 or str(value).strip() == "429":
-            return True
-
-    message = str(error).upper()
-    return (
-        "429" in message
-        or "RESOURCE_EXHAUSTED" in message
-        or "QUOTA" in message
-        or "RATE LIMIT" in message
-    )
-
-
-def _friendly_gemini_error_message(error):
-    """
-    Gemini 관련 오류를 사용자가 바로 이해할 수 있는 한국어 메시지로 바꾼다.
-    Gemini와 무관한 오류(DB 로딩 실패 등)는 원본 메시지를 그대로 돌려준다.
-    """
-    if _is_gemini_quota_exceeded(error):
-        return "AI 분석 서버의 사용량(쿼터)을 모두 소진했습니다. 잠시 후 다시 시도해 주세요."
-
-    if _is_gemini_503(error):
-        return "AI 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해 주세요."
-
-    return str(error)
-
-
-def _current_gemini_key_index():
-    with _gemini_key_lock:
-        return _gemini_key_index
-
-
-def _advance_gemini_key(from_index):
-    """쿼터가 소진된 키를 다음 키로 넘긴다. 다른 요청이 이미 넘겨놨다면 중복으로 넘기지 않는다."""
-    global _gemini_key_index
-    with _gemini_key_lock:
-        if _gemini_key_index == from_index:
-            _gemini_key_index = (_gemini_key_index + 1) % len(_gemini_clients)
-        return _gemini_key_index
-
-
-def _generate_patient_with_model(model_name, prompt):
-    """
-    준비된 Gemini API 키를 순환하며 환자 분석을 요청한다.
-    현재 키가 쿼터 초과(429)면 다음 키로 넘어가서 같은 모델로 재시도하고,
-    모든 키를 다 써봤는데도 실패하면 마지막 오류를 그대로 올린다.
-    """
-    last_error = None
-
-    for _ in range(len(_gemini_clients)):
-        key_index = _current_gemini_key_index()
-        active_client = _gemini_clients[key_index]
-
         try:
-            return active_client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=PatientInfo,
-                ),
-            )
-        except Exception as error:
-            last_error = error
-            if not _is_gemini_quota_exceeded(error):
-                raise
-
-            print(
-                f"GEMINI QUOTA EXCEEDED: key #{key_index + 1}/{len(_gemini_clients)} "
-                f"소진 -> 다음 키로 전환합니다."
-            )
-            _advance_gemini_key(key_index)
-
-    # 준비된 키를 모두 순환해도 전부 쿼터 초과였던 경우
-    raise last_error
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+    return None
 
 
-# 503(UNAVAILABLE/HIGH DEMAND) 재시도 설정. .env에서 조절 가능.
-GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
-GEMINI_RETRY_BASE_DELAY_SEC = float(os.getenv("GEMINI_RETRY_BASE_DELAY_SEC", "1.5"))
+def _patient_cache_key(text):
+    return " ".join(str(text or "").strip().split())
 
+def get_cached_patient_analysis(text):
+    key = _patient_cache_key(text)
+    if not key:
+        return None
+    with PATIENT_ANALYSIS_CACHE_LOCK:
+        cached = PATIENT_ANALYSIS_CACHE.get(key)
+    if cached is None:
+        return None
+    # 내부 list를 호출자가 변경해도 캐시 원본이 바뀌지 않도록 복사한다.
+    return json.loads(json.dumps(cached, ensure_ascii=False))
 
-def _generate_patient_with_retry(model_name, prompt, max_retries=None):
-    """
-    같은 모델로 503(일시적 과부하)이 나면 지수 백오프(+지터)를 두고
-    최대 max_retries회까지 재시도한다.
-    503이 아닌 오류(쿼터 초과 등은 _generate_patient_with_model 내부에서 처리됨)는
-    바로 올려보낸다.
-    """
-    if max_retries is None:
-        max_retries = GEMINI_MAX_RETRIES
-
-    last_error = None
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            return _generate_patient_with_model(model_name, prompt)
-        except Exception as error:
-            last_error = error
-
-            if not _is_gemini_503(error):
-                raise
-
-            if attempt == max_retries:
-                break
-
-            # 지수 백오프: 1.5s, 3s, 6s ... + 0~30% 지터(동시 요청 몰림 방지)
-            delay = GEMINI_RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1))
-            delay += random.uniform(0, delay * 0.3)
-
-            print(
-                f"GEMINI 503: {model_name} 과부하 -> "
-                f"{attempt}/{max_retries}회 재시도, {delay:.1f}초 대기"
-            )
-            time.sleep(delay)
-
-    raise last_error
-
+def cache_patient_analysis(text, patient):
+    key = _patient_cache_key(text)
+    if not key:
+        return
+    value = json.loads(json.dumps(patient, ensure_ascii=False))
+    with PATIENT_ANALYSIS_CACHE_LOCK:
+        PATIENT_ANALYSIS_CACHE[key] = value
+        while len(PATIENT_ANALYSIS_CACHE) > PATIENT_ANALYSIS_CACHE_MAX:
+            oldest_key = next(iter(PATIENT_ANALYSIS_CACHE))
+            PATIENT_ANALYSIS_CACHE.pop(oldest_key, None)
 
 def analyze_patient(text: str):
-    prompt = f"""
-너는 응급의료 환자 상태를 구조화하는 AI이다.
-아래 구급대원이 입력한 자연어 환자 상태를 분석해서 JSON으로 변환해라.
+    cached = get_cached_patient_analysis(text)
+    if cached is not None:
+        print("GROQ ANALYSIS CACHE HIT: 동일 환자 문장 재사용")
+        return cached
 
-반드시 아래 필드를 채워라.
+    system_prompt = """
+너는 SAVER 응급환자 이송병원 탐색 시스템의 환자 상태 구조화 모듈이다.
 
-suspected_category:
-- 환자 상태 카테고리
-- 예: 뇌졸중/뇌출혈 의심, 심근경색 의심, 다발성 외상, 고위험 산모, 소아 중증 탈수, 호흡곤란/중증감염, 기타
+목적은 확정 진단이나 특정 병원 추천이 아니라, 입력된 환자 서술을 SAVER 병원 데이터베이스와 비교 가능한 구조화된 요구조건으로 변환하는 것이다.
 
-ktas:
-- KTAS 1~5 정수
+반드시 아래 규칙을 지켜라.
 
-golden_time_min:
-- 골든타임 분 단위 정수
+[기본 규칙]
+1. 모든 문자열 출력은 반드시 한국어로 작성한다.
+2. 입력에 없는 증상, 나이, 성별, 신체 좌우, 활력징후를 임의로 추가하지 않는다.
+3. 특정 병원명을 출력하거나 추천하지 않는다.
+4. 각 필드는 서로 논리적으로 일관되게 판단한다.
 
-specialists:
-- 필요 전문의/진료과 리스트
-- 예: 응급의학과, 신경과, 신경외과, 심장내과, 흉부외과, 외과, 정형외과, 산부인과, 소아청소년과
+[KTAS]
+5. ktas는 1~5 사이 정수만 사용한다.
+6. KTAS의 방향은 반드시 다음과 같이 해석한다.
+   - 1: 가장 긴급
+   - 2: 매우 긴급
+   - 3: 긴급
+   - 4: 덜 긴급
+   - 5: 비응급
+7. 환자 서술의 중증도 및 다른 Boolean 요구조건과 모순되지 않도록 결정한다.
 
-equipment:
-- 필요 장비 리스트
-- 예: CT, MRI, CAG, 혈관조영, 인공호흡기
+[전문의/진료과]
+8. specialists에는 병원 DB와 매칭할 수 있도록 대한민국 의료기관에서 사용하는 표준 한국어 진료과명을 작성한다.
+   예: 응급의학과, 소아청소년과, 내과, 신경과, 신경외과, 외과, 정형외과, 심장내과, 순환기내과, 심장혈관흉부외과, 산부인과.
+9. 영문 진료과명은 사용하지 않는다. 예를 들어 Pediatrics가 아니라 소아청소년과, Emergency Medicine이 아니라 응급의학과로 작성한다.
+10. 환자에게 실제로 필요한 진료과만 포함하며 불필요하게 많은 진료과를 추가하지 않는다.
 
-req_icu:
-- ICU 필요 여부 boolean
+[의료장비]
+11. equipment에는 SAVER 병원 DB에서 직접 비교 가능한 장비만 작성한다: CT, MRI, CAG, 혈관조영, 인공호흡기.
+12. 수액, 수액백, infusion pump, vital sign monitor, 일반적인 처치도구나 소모품은 equipment에 넣지 않는다.
+13. 위 장비가 특별히 필요하지 않다면 빈 배열 []을 반환한다.
 
-req_or:
-- 수술실 필요 여부 boolean
+[병원 자원]
+14. req_icu는 중환자실이 실제로 필요하다고 판단되는 경우에만 true이다.
+15. req_or는 수술실이 실제로 필요한 경우에만 true이다.
+16. req_er_bed는 응급실에서의 수용 및 처치가 필요한 경우 true이다.
+17. req_severe_acceptance는 중증환자 수용 가능 여부의 확인이 필요한 경우 true이다.
 
-req_er_bed:
-- 응급실 병상 필요 여부 boolean
+[기타]
+18. suspected_category는 간결한 한국어 임상 범주로 작성하되, 병원 선택에 영향을 줄 수 있는 핵심 수식어를 불필요하게 생략하지 않는다.
+    - 입력에서 소아·신생아·영아 등 연령군이 명확하게 확인되면 해당 연령군을 보존한다.
+    - 입력에서 중증·경증, 급성 등 중증도 또는 시간적 특성이 명확하게 표현되어 있고 병원 선택에 의미가 있으면 이를 보존한다.
+    - 예: "5세 남아, 중증 탈수 의심, 소아 응급 진료 필요" → "소아 중증 탈수"
+    - 예: 단순히 "탈수 의심"이라고만 제시된 경우 입력에 없는 "소아"나 "중증"을 임의로 추가하지 않는다.
+    - 너무 포괄적인 단어 하나만 남겨 원문의 중요한 임상적 구분을 소실하지 않는다.
+19. golden_time_min은 이송의 시간적 우선순위를 나타내는 분 단위 정수로 작성한다.
+20. 반드시 지정된 JSON schema만 반환한다.
+""".strip()
 
-req_severe_acceptance:
-- 중증환자 수용 가능성 확인 필요 여부 boolean
+    response = GROQ_CLIENT.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": str(text or "").strip()},
+        ],
+        reasoning_effort="medium",
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "patient_info",
+                "strict": True,
+                "schema": PatientInfo.model_json_schema(),
+            },
+        },
+    )
 
-중요:
-- 병원 추천은 하지 마라.
-- 환자 상태에서 필요한 조건만 구조화해라.
-- 잘 모르겠으면 응급 상황에서 안전한 쪽으로 판단해라.
+    content = response.choices[0].message.content or ""
+    if not content.strip():
+        raise RuntimeError("Groq 환자 상태 구조화 응답이 비어 있습니다.")
 
-환자 상태:
-{text}
-"""
-
-    try:
-        response = _generate_patient_with_retry(
-            GEMINI_MODEL,
-            prompt,
-        )
-        used_model = GEMINI_MODEL
-
-    except Exception as primary_error:
-        if (
-            not _is_gemini_503(primary_error)
-            or not GEMINI_FALLBACK_MODEL
-            or GEMINI_FALLBACK_MODEL == GEMINI_MODEL
-        ):
-            raise
-
-        print(
-            f"GEMINI 503: {GEMINI_MODEL} 재시도 {GEMINI_MAX_RETRIES}회 모두 실패 -> "
-            f"fallback to {GEMINI_FALLBACK_MODEL}"
-        )
-
-        response = _generate_patient_with_retry(
-            GEMINI_FALLBACK_MODEL,
-            prompt,
-        )
-        used_model = GEMINI_FALLBACK_MODEL
-
-    patient = PatientInfo.model_validate_json(response.text)
+    patient = PatientInfo.model_validate_json(content)
     result = patient.model_dump()
+    cache_patient_analysis(text, result)
 
-    print(f"GEMINI ANALYSIS MODEL: {used_model}")
-
+    print(f"GROQ ANALYSIS MODEL: {GROQ_MODEL}")
     return result
 
 
@@ -1291,10 +1218,21 @@ def analyze_patient_api():
 
     except Exception as e:
         print("AI ERROR:", e)
+        status_code = _groq_status_code(e)
+        if status_code == 429:
+            return jsonify({
+                "success": False,
+                "error": "Groq 무료 API 요청 한도에 도달했습니다. 한도가 복구된 뒤 다시 시도해 주세요."
+            }), 429
+        if status_code is not None and status_code >= 500:
+            return jsonify({
+                "success": False,
+                "error": "Groq 모델 서버에서 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+            }), 503
 
         return jsonify({
             "success": False,
-            "error": _friendly_gemini_error_message(e)
+            "error": str(e)
         }), 500
 
 
@@ -1641,108 +1579,6 @@ def call_kakao_route(
     return data
 
 
-# "병원 수용 가능 여부 판별 결과" 표에 쓸 ETA/거리를 이송 경로 표시(내비게이션) 화면과
-# 동일한 방식(카카오모빌리티 실제 경로 API)으로 맞추기 위한 다중 목적지 조회.
-KAKAO_ETA_BATCH_MAX_DESTINATIONS = 30
-
-# 병원이 많을 때 매번 전체를 카카오 API로 조회하면 느리고 호출량도 커지므로,
-# 직선거리가 가까운 순으로 최대 이 개수까지만 실제 경로를 조회한다.
-# (.env의 KAKAO_ETA_MAX_CANDIDATES로 조절 가능. 값을 늘릴수록 정확도는 오르고 속도는 느려진다.)
-KAKAO_ETA_MAX_CANDIDATES = int(os.getenv("KAKAO_ETA_MAX_CANDIDATES", "60"))
-
-# 주의: 직선거리로 뽑은 후보 안에 "실제로는 도로가 더 빠른" 병원이 없으리라는 보장은 없다
-# (직선으로는 가깝지만 우회가 필요한 병원, 반대로 직선으로는 조금 멀어도 큰길이 뚫려 있어
-#  실제로는 더 빠른 병원이 있을 수 있음). 이를 완화하기 위해, 단순히 가까운 N개를 딱 자르지 않고
-# "N번째로 가까운 병원의 직선거리 × 여유배율" 안에 드는 병원은 모두 후보에 포함시킨다.
-KAKAO_ETA_CANDIDATE_MARGIN = float(os.getenv("KAKAO_ETA_CANDIDATE_MARGIN", "1.5"))
-
-# 여유배율을 적용해도 병원 수가 무한정 늘어나지 않도록 최종 상한선을 둔다.
-KAKAO_ETA_HARD_CAP = int(os.getenv("KAKAO_ETA_HARD_CAP", "90"))
-
-
-def call_kakao_multi_eta(origin_lat, origin_lng, destinations):
-    """
-    destinations: [{"key": "0", "lat": .., "lng": ..}, ...] (최대 30개)
-    반환: {key: {"distance_km": .., "eta_min": ..}}
-    실패했거나 경로를 못 찾은 목적지는 결과에서 제외된다(호출부에서 haversine 값으로 폴백).
-
-    이송 경로 표시 화면(renderRoutePreview)과 동일하게,
-    카카오 응답의 duration(초)/distance(m)를 그대로 분/㎞로 변환하며
-    추가 오버헤드(FIXED_DISPATCH_OVERHEAD_MIN)는 더하지 않는다.
-    """
-    if not KAKAO_REST_API_KEY or not destinations:
-        return {}
-
-    if not is_valid_korean_coordinate(origin_lat, origin_lng):
-        return {}
-
-    payload_destinations = []
-    for dest in destinations:
-        lat, lng = dest.get("lat"), dest.get("lng")
-        if not is_valid_korean_coordinate(lat, lng):
-            continue
-        payload_destinations.append({
-            "key": str(dest.get("key")),
-            "x": float(lng),
-            "y": float(lat),
-        })
-
-    if not payload_destinations:
-        return {}
-
-    try:
-        response = requests.post(
-            "https://apis-navi.kakaomobility.com/v1/destinations/directions",
-            headers={
-                "Authorization": f"KakaoAK {KAKAO_REST_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "origin": {"x": float(origin_lng), "y": float(origin_lat)},
-                "destinations": payload_destinations,
-                "radius": 10000,
-                "priority": "TIME",
-                "roadevent": 0,
-            },
-            timeout=KAKAO_REQUEST_TIMEOUT_SEC,
-        )
-        response.raise_for_status()
-        data = response.json()
-    except Exception as error:
-        print(f"KAKAO MULTI ETA 호출 실패: {error}")
-        return {}
-
-    results = {}
-    for route in (data.get("routes") or []):
-        if route.get("result_code") != 0:
-            continue
-
-        summary = route.get("summary") or {}
-        distance_m = summary.get("distance")
-        duration_s = summary.get("duration")
-
-        if distance_m is None or duration_s is None:
-            continue
-
-        key = str(route.get("key"))
-        results[key] = {
-            # 프론트엔드 renderRoutePreview()와 동일한 반올림 방식으로 맞춘다.
-            "distance_km": round(distance_m / 1000, 2),
-            "eta_min": max(1, round(duration_s / 60)),
-        }
-
-    return results
-
-
-def call_kakao_multi_eta_batched(origin_lat, origin_lng, destinations):
-    """카카오 다중목적지 API는 한 번에 최대 30개까지만 되므로 잘라서 여러 번 호출한다."""
-    merged = {}
-    for start in range(0, len(destinations), KAKAO_ETA_BATCH_MAX_DESTINATIONS):
-        chunk = destinations[start:start + KAKAO_ETA_BATCH_MAX_DESTINATIONS]
-        merged.update(call_kakao_multi_eta(origin_lat, origin_lng, chunk))
-    return merged
-
-
 def random_location_near_hospital(
     hospital
 ):
@@ -1916,38 +1752,19 @@ def compute_congestion_score(
     )
 
 
-def get_patient_priority_profile(patient):
-    """환자 중증도와 골든타임에 따라 모델의 선호도 프로파일을 반환합니다."""
-    ktas = to_number(patient.get("ktas"))
-    golden_time = to_number(patient.get("golden_time_min"))
-    critical = (ktas is not None and ktas <= 2) or (golden_time is not None and golden_time <= 60)
-    profile_name = "critical" if critical else "standard"
-
-    if ktas is not None:
-        severity_weight = {1: 3.0, 2: 2.4, 3: 1.7, 4: 1.2, 5: 1.0}.get(int(ktas), 1.5)
-    else:
-        severity_weight = 1.5
-
-    return {
-        "name": profile_name,
-        "label": "시간 민감/중증" if critical else "표준",
-        "severity_weight": severity_weight,
-        "golden_time_min": golden_time,
-        "topsis_weights": TOPSIS_VARIANTS["C2"]["weight_profiles"][profile_name],
-    }
-
-
 def compute_data_freshness_score(hospital, now=None):
-    """실시간 데이터 최신성 점수를 0~1로 환산합니다."""
+    """실시간 데이터의 최신성을 0~1로 환산한다."""
     timestamp = None
     for col in ["data_fetched_at", "hvidate", "master_last_updated_at", "departments_last_checked_at"]:
         value = hospital.get(col)
         if value is None or (isinstance(value, float) and math.isnan(value)):
             continue
+
         text = str(value).strip()
         if not text or text.lower() in ["none", "nan"]:
             continue
 
+        # 응급의료 API hvidate의 YYYYMMDDHHMMSS 숫자 형식 보정.
         compact = text.split(".")[0]
         if compact.isdigit() and len(compact) == 14:
             parsed = pd.to_datetime(compact, format="%Y%m%d%H%M%S", errors="coerce")
@@ -1968,16 +1785,49 @@ def compute_data_freshness_score(hospital, now=None):
         now_ts = now_ts.tz_localize(None)
 
     age_min = max(0.0, (now_ts - timestamp).total_seconds() / 60.0)
-    if age_min <= 15: return 1.0
-    if age_min <= 60: return 0.85
-    if age_min <= 180: return 0.65
-    if age_min <= 720: return 0.4
-    if age_min <= 1440: return 0.25
+    if age_min <= 15:
+        return 1.0
+    if age_min <= 60:
+        return 0.85
+    if age_min <= 180:
+        return 0.65
+    if age_min <= 720:
+        return 0.4
+    if age_min <= 1440:
+        return 0.25
     return 0.1
 
+def get_patient_priority_profile(patient):
+    """환자 중증도와 골든타임에 따라 모델의 선호도 프로파일을 반환한다.
+
+    KTAS 1~2 또는 골든타임 60분 이하는 시간 민감 환자로 보고,
+    예상 치료시작 지연과 임상 적합성에 더 큰 비중을 둔다.
+    """
+    ktas = to_number(patient.get("ktas"))
+    golden_time = to_number(patient.get("golden_time_min"))
+    critical = (ktas is not None and ktas <= 2) or (golden_time is not None and golden_time <= 60)
+    profile_name = "critical" if critical else "standard"
+
+    if ktas is not None:
+        severity_weight = {1: 3.0, 2: 2.4, 3: 1.7, 4: 1.2, 5: 1.0}.get(int(ktas), 1.5)
+    else:
+        severity_weight = 1.5
+
+    return {
+        "name": profile_name,
+        "label": "시간 민감/중증" if critical else "표준",
+        "severity_weight": severity_weight,
+        "golden_time_min": golden_time,
+        "topsis_weights": TOPSIS_VARIANTS["C2"]["weight_profiles"][profile_name],
+    }
 
 def compute_operational_estimates(hospital, eta_min, congestion_score, now=None):
-    """대기, 거절, 재이송 지연 및 수용확률 추정치를 계산합니다."""
+    """
+    현재 보유한 데이터로 예상 대기·거절·재이송 지연을 보수적으로 근사한다.
+
+    해당 값은 학습된 확률이 아니므로, 실제 병원 수용 응답/도착 기록이
+    쌓이면 교체해야 하는 프록시이다.
+    """
     acceptance_score = float(to_number(hospital.get("acceptance_score")) or 0.0)
     clinical_score = min(1.0, max(0.0, acceptance_score / 100.0))
     freshness = compute_data_freshness_score(hospital, now=now)
@@ -2019,9 +1869,14 @@ def compute_operational_estimates(hospital, eta_min, congestion_score, now=None)
         "effective_treatment_delay_min": round(effective_delay, 1) if effective_delay is not None else None,
     }
 
-
 def compute_specialty_margin(hospital, patient):
-    """필수 전문과 충족 후 여유 전문의 수를 계산합니다."""
+    """
+    필수 전문과를 충족한 후 남는 전문의 수를 '전문치료 여유도'로 계산한다.
+
+    병상(hvec)은 congestion_score와 중복되므로 포함하지 않는다.
+    전문의 인원 자료가 없고 진료과 존재 여부만 있는 병원은 추가 여유를
+    증명할 수 없으므로 0으로 둔다. 결측을 임의의 장점으로 바꾸지 않기 위한 보수적 정의다.
+    """
     required_specialties = {
         str(name).strip()
         for name in (patient or {}).get("specialists", []) or []
@@ -2038,99 +1893,161 @@ def compute_specialty_margin(hospital, patient):
     margin = max(0.0, float(total_count) - minimum_required_count)
     return round(margin, 3), f"전문의 {int(total_count)}명 - 필수과 최소 {int(minimum_required_count)}명"
 
+def get_topsis_criteria(variant=DEFAULT_TOPSIS_VARIANT, patient=None):
+    """변형별 기준을 복사해 반환한다. 원본 설정은 절대 변경하지 않는다."""
+    variant = str(variant or DEFAULT_TOPSIS_VARIANT).strip().upper()
+    if variant not in TOPSIS_VARIANTS:
+        raise ValueError(f"알 수 없는 TOPSIS 변형입니다: {variant}")
 
-def attach_routing_fields(hospital_df, ambulance_lat, ambulance_lng, patient=None, as_of=None):
-    """이동거리/ETA/혼잡도 및 예상 치료시작 지연 정보 필드를 결합합니다."""
+    config = TOPSIS_VARIANTS[variant]
+    if config.get("criteria_from"):
+        base = TOPSIS_VARIANTS[config["criteria_from"]]["criteria"]
+    else:
+        base = config["criteria"]
+
+    criteria = {
+        name: {"benefit": bool(values["benefit"]), "weight": float(values["weight"])}
+        for name, values in base.items()
+    }
+
+    profile = None
+    if config.get("patient_aware"):
+        profile = get_patient_priority_profile(patient or {})
+        profile_weights = config["weight_profiles"][profile["name"]]
+        for name in criteria:
+            criteria[name]["weight"] = float(profile_weights[name])
+
+    weight_sum = sum(values["weight"] for values in criteria.values())
+    if not math.isclose(weight_sum, 1.0, abs_tol=1e-9):
+        raise ValueError(f"{variant} TOPSIS 가중치 합이 1이 아닙니다: {weight_sum}")
+
+    return criteria, profile
+
+def get_topsis_variant_metadata(variant=DEFAULT_TOPSIS_VARIANT, patient=None):
+    """API와 실험 로그에 내보낼 재현 가능한 변형 메타데이터."""
+    variant = str(variant or DEFAULT_TOPSIS_VARIANT).strip().upper()
+    criteria, profile = get_topsis_criteria(variant, patient)
+    config = TOPSIS_VARIANTS[variant]
+    return {
+        "key": variant,
+        "label": config["label"],
+        "description": config["description"],
+        "experimental": bool(config.get("experimental", False)),
+        "patient_profile": profile["name"] if profile else None,
+        "criteria": [
+            {
+                "name": name,
+                "direction": "benefit" if values["benefit"] else "cost",
+                "weight": values["weight"],
+            }
+            for name, values in criteria.items()
+        ],
+    }
+
+def _topsis_closeness(df, criteria):
+    """
+    변형을 모르는 공통 TOPSIS 순수 계산 엔진.
+
+    결측치는 benefit 기준의 최솟값, cost 기준의 최댓값으로
+    보수적 대체한다. 변형 분기는 이 함수 안에 두지 않는다.
+    """
+    if df.empty:
+        return pd.Series(dtype=float, index=df.index)
+
+    missing_columns = [name for name in criteria if name not in df.columns]
+    if missing_columns:
+        raise KeyError(f"TOPSIS 기준 컬럼이 없습니다: {', '.join(missing_columns)}")
+
+    matrix = pd.DataFrame(index=df.index)
+    for column, config in criteria.items():
+        values = pd.to_numeric(df[column], errors="coerce")
+        if values.notna().any():
+            fill_value = values.min() if config["benefit"] else values.max()
+        else:
+            fill_value = 0.0
+        matrix[column] = values.fillna(fill_value)
+
+    vector_norm = np.sqrt((matrix ** 2).sum()).replace(0, np.nan)
+    normalized = matrix.divide(vector_norm, axis=1).fillna(0.0)
+    weighted = normalized.copy()
+    for column, config in criteria.items():
+        weighted[column] = normalized[column] * float(config["weight"])
+
+    ideal_best = {}
+    ideal_worst = {}
+    for column, config in criteria.items():
+        if config["benefit"]:
+            ideal_best[column] = weighted[column].max()
+            ideal_worst[column] = weighted[column].min()
+        else:
+            ideal_best[column] = weighted[column].min()
+            ideal_worst[column] = weighted[column].max()
+
+    distance_best = np.sqrt(sum((weighted[column] - ideal_best[column]) ** 2 for column in criteria))
+    distance_worst = np.sqrt(sum((weighted[column] - ideal_worst[column]) ** 2 for column in criteria))
+    denominator = (distance_best + distance_worst).replace(0, np.nan)
+    return (distance_worst / denominator).fillna(0.5)
+
+def attach_routing_fields(
+    hospital_df,
+    ambulance_lat,
+    ambulance_lng
+):
+    """
+    acceptance/rejection 계산이 끝난 결과 DataFrame에
+    거리/ETA/혼잡도 컬럼을 추가한다.
+    """
+
     if hospital_df.empty:
         hospital_df["distance_km"] = []
         hospital_df["eta_min"] = []
-        hospital_df["eta_is_routed"] = []
         hospital_df["congestion_score"] = []
-        hospital_df["data_freshness_score"] = []
-        hospital_df["data_reliability_score"] = []
-        hospital_df["estimated_acceptance_probability"] = []
-        hospital_df["expected_wait_min"] = []
-        hospital_df["expected_rejection_delay_min"] = []
-        hospital_df["expected_retransfer_delay_min"] = []
-        hospital_df["effective_treatment_delay_min"] = []
-        hospital_df["specialty_margin"] = []
-        hospital_df["specialty_margin_basis"] = []
+
         return hospital_df
 
-    # 1) 우선 모든 병원에 대해 직선거리 기반 근사치를 계산해둔다.
-    #    카카오 API 호출이 실패하거나, 아래 KAKAO_ETA_MAX_CANDIDATES를 넘어가는
-    #    병원에 대한 폴백 값으로 쓰인다.
-    distances, etas = [], []
+    distances = []
+    etas = []
+    congestions = []
+
     for _, row in hospital_df.iterrows():
-        distance_km, eta_min = compute_distance_and_eta(row, ambulance_lat, ambulance_lng)
-        distances.append(distance_km)
-        etas.append(eta_min)
-
-    eta_is_routed = [False] * len(hospital_df)
-
-    # 2) "이송 경로 표시" 화면과 동일한 카카오모빌리티 실제 경로 API로 값을 덮어쓴다.
-    #    병원이 너무 많으면 느려지므로, 직선거리가 가까운 순으로
-    #    KAKAO_ETA_MAX_CANDIDATES개까지만 실제 경로를 조회한다.
-    if KAKAO_REST_API_KEY:
-        sorted_idx = sorted(
-            range(len(hospital_df)),
-            key=lambda i: (distances[i] if distances[i] is not None else float("inf")),
+        (
+            distance_km,
+            eta_min,
+        ) = compute_distance_and_eta(
+            row,
+            ambulance_lat,
+            ambulance_lng
         )
 
-        if len(sorted_idx) <= KAKAO_ETA_MAX_CANDIDATES:
-            # 병원 수가 이미 적으면(예: 진료과/장비로 걸러진 수용가능 목록) 전부 실제 경로로 조회한다.
-            order = sorted_idx
-        else:
-            cutoff_idx = sorted_idx[KAKAO_ETA_MAX_CANDIDATES - 1]
-            cutoff_distance = distances[cutoff_idx]
+        distances.append(
+            distance_km
+        )
 
-            if cutoff_distance is None:
-                order = sorted_idx[:KAKAO_ETA_MAX_CANDIDATES]
-            else:
-                # N번째로 가까운 병원의 직선거리 × 여유배율 안에 드는 병원은 모두 포함시켜,
-                # "직선으로는 조금 멀지만 실제 도로는 더 빠른" 병원이 통째로 빠지지 않게 한다.
-                margin_distance = cutoff_distance * KAKAO_ETA_CANDIDATE_MARGIN
-                order = [
-                    i for i in sorted_idx
-                    if (distances[i] if distances[i] is not None else float("inf")) <= margin_distance
-                ][:KAKAO_ETA_HARD_CAP]
+        etas.append(
+            eta_min
+        )
 
-        destinations = []
-        for i in order:
-            hosp_lat, hosp_lng = get_hospital_lat_lng(hospital_df.iloc[i])
-            if hosp_lat is None or hosp_lng is None:
-                continue
-            destinations.append({"key": str(i), "lat": hosp_lat, "lng": hosp_lng})
+        congestions.append(
+            compute_congestion_score(
+                row
+            )
+        )
 
-        kakao_results = call_kakao_multi_eta_batched(ambulance_lat, ambulance_lng, destinations)
+    hospital_df = (
+        hospital_df.copy()
+    )
 
-        for key, values in kakao_results.items():
-            i = int(key)
-            distances[i] = values["distance_km"]
-            etas[i] = values["eta_min"]
-            eta_is_routed[i] = True
+    hospital_df[
+        "distance_km"
+    ] = distances
 
-    congestions = []
-    operational_estimates, specialty_margins, specialty_margin_bases = [], [], []
+    hospital_df[
+        "eta_min"
+    ] = etas
 
-    for idx, (_, row) in enumerate(hospital_df.iterrows()):
-        congestion_score = compute_congestion_score(row)
-        congestions.append(congestion_score)
-        operational_estimates.append(compute_operational_estimates(row, etas[idx], congestion_score, now=as_of))
-        specialty_margin, specialty_margin_basis = compute_specialty_margin(row, patient or {})
-        specialty_margins.append(specialty_margin)
-        specialty_margin_bases.append(specialty_margin_basis)
-
-    hospital_df = hospital_df.copy()
-    hospital_df["distance_km"] = distances
-    hospital_df["eta_min"] = etas
-    # true면 카카오 실제 경로 기준, false면 직선거리 근사치(카카오 호출 실패/범위 밖)임을 프론트엔드에서 구분할 수 있게 한다.
-    hospital_df["eta_is_routed"] = eta_is_routed
-    hospital_df["congestion_score"] = congestions
-    for col in operational_estimates[0]:
-        hospital_df[col] = [estimate[col] for estimate in operational_estimates]
-    hospital_df["specialty_margin"] = specialty_margins
-    hospital_df["specialty_margin_basis"] = specialty_margin_bases
+    hospital_df[
+        "congestion_score"
+    ] = congestions
 
     return hospital_df
 
@@ -2180,75 +2097,365 @@ def _normalize_series(
     return normalized
 
 
-def rank_model_a(
-    acceptable_df
+
+def _preselect_kakao_candidates(hospital_df, ambulance_lat, ambulance_lng, limit=KAKAO_RANKING_CANDIDATE_LIMIT):
+    """카카오 API 호출 대상만 최대 30개로 줄인다. 이 거리값은 최종 모델/화면에 사용하지 않는다."""
+    if hospital_df.empty:
+        return hospital_df.copy()
+
+    df = hospital_df.copy()
+    preselect_distances = []
+    for _, row in df.iterrows():
+        hosp_lat, hosp_lng = get_hospital_lat_lng(row)
+        if hosp_lat is None or hosp_lng is None:
+            preselect_distances.append(float("inf"))
+            continue
+        distance = haversine_km(ambulance_lat, ambulance_lng, hosp_lat, hosp_lng)
+        preselect_distances.append(float(distance) if distance is not None else float("inf"))
+
+    df["_kakao_preselect_distance"] = preselect_distances
+    df = df[np.isfinite(pd.to_numeric(df["_kakao_preselect_distance"], errors="coerce"))].copy()
+    df = df.sort_values("_kakao_preselect_distance", ascending=True, kind="mergesort").head(int(limit)).copy()
+    return df.drop(columns=["_kakao_preselect_distance"], errors="ignore")
+
+
+def _kakao_route_cache_key(origin_lat, origin_lng, destination_lat, destination_lng):
+    return (
+        round(float(origin_lat), 6),
+        round(float(origin_lng), 6),
+        round(float(destination_lat), 6),
+        round(float(destination_lng), 6),
+    )
+
+
+def _get_cached_kakao_eta(origin_lat, origin_lng, destination_lat, destination_lng):
+    """같은 출발지/도착지의 성공·실패 라우팅 상태를 TTL 동안 재사용한다."""
+    key = _kakao_route_cache_key(origin_lat, origin_lng, destination_lat, destination_lng)
+    with KAKAO_ROUTE_CACHE_LOCK:
+        item = KAKAO_ROUTE_CACHE.get(key)
+        if not item:
+            return None
+        if time.time() - float(item.get("cached_at", 0)) > KAKAO_ROUTE_CACHE_TTL_SEC:
+            KAKAO_ROUTE_CACHE.pop(key, None)
+            return None
+        return dict(item)
+
+
+def _set_cached_kakao_eta(origin_lat, origin_lng, destination_lat, destination_lng, distance_km, eta_min):
+    key = _kakao_route_cache_key(origin_lat, origin_lng, destination_lat, destination_lng)
+    with KAKAO_ROUTE_CACHE_LOCK:
+        KAKAO_ROUTE_CACHE[key] = {
+            "kakao_route_ok": True,
+            "distance_km": float(distance_km),
+            "eta_min": int(eta_min),
+            "cached_at": time.time(),
+        }
+
+
+def _set_cached_kakao_failure(origin_lat, origin_lng, destination_lat, destination_lng):
+    """다중 목적지에서 확인되지 않은 후보도 잠시 캐시해 모델 전환 시 재요청을 막는다."""
+    key = _kakao_route_cache_key(origin_lat, origin_lng, destination_lat, destination_lng)
+    with KAKAO_ROUTE_CACHE_LOCK:
+        KAKAO_ROUTE_CACHE[key] = {
+            "kakao_route_ok": False,
+            "cached_at": time.time(),
+        }
+
+
+def call_kakao_multi_destination_eta(hospital_df, ambulance_lat, ambulance_lng):
+    """
+    카카오 다중 목적지 API만 사용해 최대 30개 후보의 도로거리/ETA를 조회한다.
+
+    - 성공한 후보는 실제 카카오 거리/ETA를 저장한다.
+    - result_code 실패/반경 초과 후보는 여기서 single directions를 추가 호출하지 않는다.
+    - 성공/실패 모두 TTL 캐시에 저장하므로 같은 위치에서 A/B/C/D를 바꿔도
+      동일 후보에 외부 API를 반복 호출하지 않는다.
+    """
+    if hospital_df.empty:
+        return hospital_df.copy()
+    if len(hospital_df) > KAKAO_RANKING_CANDIDATE_LIMIT:
+        raise ValueError(f"카카오 ETA 후보는 최대 {KAKAO_RANKING_CANDIDATE_LIMIT}개까지 가능합니다.")
+    if not KAKAO_REST_API_KEY:
+        raise RuntimeError(".env에 KAKAO_REST_API_KEY가 설정되어 있지 않습니다.")
+    if not is_valid_korean_coordinate(ambulance_lat, ambulance_lng):
+        raise ValueError("환자 위치 좌표가 올바르지 않습니다.")
+
+    out = hospital_df.copy()
+    out["distance_km"] = np.nan
+    out["eta_min"] = np.nan
+    out["kakao_route_ok"] = False
+    out["routing_source"] = "kakao_unavailable"
+
+    uncached = []
+    for idx, row in hospital_df.iterrows():
+        lat, lng = get_hospital_lat_lng(row)
+        if not is_valid_korean_coordinate(lat, lng):
+            continue
+
+        cached = _get_cached_kakao_eta(ambulance_lat, ambulance_lng, lat, lng)
+        if cached is not None:
+            if bool(cached.get("kakao_route_ok")):
+                out.at[idx, "distance_km"] = round(float(cached["distance_km"]), 2)
+                out.at[idx, "eta_min"] = int(cached["eta_min"])
+                out.at[idx, "kakao_route_ok"] = True
+                out.at[idx, "routing_source"] = "kakao_cache"
+            else:
+                out.at[idx, "routing_source"] = "kakao_unavailable_cached"
+            continue
+
+        uncached.append((idx, float(lat), float(lng)))
+
+    if not uncached:
+        return out
+
+    destinations = []
+    key_to_item = {}
+    for pos, (idx, lat, lng) in enumerate(uncached):
+        key = str(pos)
+        destinations.append({"key": key, "x": lng, "y": lat})
+        key_to_item[key] = (idx, lat, lng)
+
+    response = requests.post(
+        "https://apis-navi.kakaomobility.com/v1/destinations/directions",
+        headers={
+            "Authorization": f"KakaoAK {KAKAO_REST_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "origin": {"x": float(ambulance_lng), "y": float(ambulance_lat)},
+            "destinations": destinations,
+            "radius": 10000,
+            "priority": "TIME",
+            "roadevent": 0,
+        },
+        timeout=KAKAO_REQUEST_TIMEOUT_SEC,
+    )
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"raw": response.text[:1000]}
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"카카오모빌리티 다중 목적지 ETA 조회 실패 (HTTP {response.status_code}): {data}"
+        )
+
+    route_by_key = {str(route.get("key")): route for route in (data.get("routes") or [])}
+    for key, (idx, lat, lng) in key_to_item.items():
+        route = route_by_key.get(key) or {}
+        if int(route.get("result_code", -1)) != 0:
+            _set_cached_kakao_failure(ambulance_lat, ambulance_lng, lat, lng)
+            continue
+
+        summary = route.get("summary") or {}
+        distance_m = to_number(summary.get("distance"))
+        duration_sec = to_number(summary.get("duration"))
+        if distance_m is None or duration_sec is None:
+            _set_cached_kakao_failure(ambulance_lat, ambulance_lng, lat, lng)
+            continue
+
+        distance_km = round(float(distance_m) / 1000.0, 2)
+        eta_min = max(1, int(round(float(duration_sec) / 60.0)))
+        out.at[idx, "distance_km"] = distance_km
+        out.at[idx, "eta_min"] = eta_min
+        out.at[idx, "kakao_route_ok"] = True
+        out.at[idx, "routing_source"] = "kakao_multi_destination"
+        _set_cached_kakao_eta(
+            ambulance_lat,
+            ambulance_lng,
+            lat,
+            lng,
+            distance_km,
+            eta_min,
+        )
+
+    return out
+
+
+def _attach_estimated_route_fallback(hospital_df, ambulance_lat, ambulance_lng):
+    """
+    Kakao 다중 목적지 결과가 없는 병원도 후보에서 제거하지 않는다.
+
+    해당 병원은 기존 SAVER의 직선거리→도로거리 보정/평균속도 ETA 추정값을 사용하며,
+    routing_source='estimated_fallback'으로 명확히 표시한다.
+    """
+    if hospital_df.empty:
+        return hospital_df.copy()
+
+    out = hospital_df.copy()
+    if "distance_km" not in out.columns:
+        out["distance_km"] = np.nan
+    if "eta_min" not in out.columns:
+        out["eta_min"] = np.nan
+    if "kakao_route_ok" not in out.columns:
+        out["kakao_route_ok"] = False
+    if "routing_source" not in out.columns:
+        out["routing_source"] = "kakao_unavailable"
+
+    for idx, row in out.iterrows():
+        if bool(row.get("kakao_route_ok")):
+            continue
+
+        distance_km, eta_min = compute_distance_and_eta(row, ambulance_lat, ambulance_lng)
+        if distance_km is None or eta_min is None:
+            continue
+
+        out.at[idx, "distance_km"] = distance_km
+        out.at[idx, "eta_min"] = eta_min
+        out.at[idx, "routing_source"] = "estimated_fallback"
+
+    return out
+
+
+def _prepare_routing_candidates_two_batches(
+    acceptable_df,
+    ambulance_lat,
+    ambulance_lng,
+    target_confirmed=KAKAO_TARGET_CONFIRMED_ROUTES,
 ):
     """
-    Model A:
-    가장 가까운 병원 추천
-    """
+    Hard Filter 통과 병원 중 가까운 후보를 최대 2개 batch로 조회한다.
 
+    1차 batch(최대 30개)에서 실제 Kakao 경로가 target_confirmed개 이상 확보되면 종료한다.
+    부족할 때만 다음 30개를 2차 batch로 조회한다.
+    각 batch의 Kakao 누락 후보는 제거하지 않고 추정 거리/ETA를 붙인다.
+    """
+    if acceptable_df.empty:
+        return acceptable_df.copy(), 0, 0
+
+    # 기존 _preselect_kakao_candidates와 동일한 직선거리 사전선별 규칙을 사용하되,
+    # 최대 2 batch 분량까지 한 번만 정렬한다.
+    df = acceptable_df.copy()
+    preselect_distances = []
+    for _, row in df.iterrows():
+        hosp_lat, hosp_lng = get_hospital_lat_lng(row)
+        if not is_valid_korean_coordinate(hosp_lat, hosp_lng):
+            preselect_distances.append(float("inf"))
+            continue
+        distance = haversine_km(ambulance_lat, ambulance_lng, hosp_lat, hosp_lng)
+        preselect_distances.append(float(distance) if distance is not None else float("inf"))
+
+    df["_kakao_preselect_distance"] = preselect_distances
+    finite_mask = np.isfinite(pd.to_numeric(df["_kakao_preselect_distance"], errors="coerce"))
+    df = df[finite_mask].copy()
+    df = df.sort_values("_kakao_preselect_distance", ascending=True, kind="mergesort")
+
+    max_candidates = KAKAO_RANKING_CANDIDATE_LIMIT * KAKAO_MAX_BATCHES
+    df = df.head(max_candidates).drop(columns=["_kakao_preselect_distance"], errors="ignore")
+
+    routed_batches = []
+    confirmed_count = 0
+    batch_count = 0
+
+    for batch_no in range(KAKAO_MAX_BATCHES):
+        start = batch_no * KAKAO_RANKING_CANDIDATE_LIMIT
+        end = start + KAKAO_RANKING_CANDIDATE_LIMIT
+        batch = df.iloc[start:end].copy()
+        if batch.empty:
+            break
+
+        # 2차 batch는 1차에서 실제 Kakao 경로가 충분하지 않을 때만 호출한다.
+        if batch_no > 0 and confirmed_count >= min(int(target_confirmed), len(df)):
+            break
+
+        batch_count += 1
+        try:
+            routed = call_kakao_multi_destination_eta(batch, ambulance_lat, ambulance_lng)
+        except Exception as exc:
+            print(f"KAKAO MULTI BATCH ERROR batch={batch_no + 1}: {exc}")
+            routed = batch.copy()
+            routed["distance_km"] = np.nan
+            routed["eta_min"] = np.nan
+            routed["kakao_route_ok"] = False
+            routed["routing_source"] = "kakao_batch_error"
+
+        confirmed_count += int(pd.Series(routed["kakao_route_ok"]).fillna(False).astype(bool).sum())
+        routed = _attach_estimated_route_fallback(routed, ambulance_lat, ambulance_lng)
+        routed_batches.append(routed)
+
+    if not routed_batches:
+        return acceptable_df.head(0).copy(), 0, 0
+
+    combined = pd.concat(routed_batches, axis=0)
+    combined = combined[~combined.index.duplicated(keep="first")].copy()
+    return combined, confirmed_count, batch_count
+
+
+def attach_model_feature_fields(hospital_df, patient=None, as_of=None):
+    """카카오 거리/ETA가 붙은 후보에 개선 ver_0920의 모델용 파생변수를 추가한다."""
+    if hospital_df.empty:
+        return hospital_df.copy()
+
+    df = hospital_df.copy()
+    congestions = []
+    operational_estimates = []
+    specialty_margins = []
+    specialty_margin_bases = []
+
+    for _, row in df.iterrows():
+        congestion_score = compute_congestion_score(row)
+        congestions.append(congestion_score)
+        operational_estimates.append(
+            compute_operational_estimates(row, to_number(row.get("eta_min")), congestion_score, now=as_of)
+        )
+        specialty_margin, specialty_margin_basis = compute_specialty_margin(row, patient or {})
+        specialty_margins.append(specialty_margin)
+        specialty_margin_bases.append(specialty_margin_basis)
+
+    df["congestion_score"] = congestions
+    if operational_estimates:
+        for col in operational_estimates[0]:
+            df[col] = [estimate[col] for estimate in operational_estimates]
+    df["specialty_margin"] = specialty_margins
+    df["specialty_margin_basis"] = specialty_margin_bases
+    return df
+
+def rank_model_a(acceptable_df):
+    """Model A: 카카오 실제 도로거리가 가까운 순으로 병원을 정렬한다."""
     if acceptable_df.empty:
         return acceptable_df
 
     df = acceptable_df.copy()
+    # Model A의 원래 순위 기준은 카카오 실제 도로거리이다.
+    # 화면에는 순서를 보존한 0~100 "추천 점수"로만 표시하며, 순위 로직 자체는 바꾸지 않는다.
+    distance_values = pd.to_numeric(df["distance_km"], errors="coerce")
+    df["model_score"] = (_normalize_series(distance_values, higher_is_better=False) * 100.0).round(2)
+    df["model_score_raw"] = distance_values.round(3)
+    df["model_score_label"] = "Model A 거리 기반 추천 점수"
 
-    df["_sort_distance"] = (
-        df["distance_km"].apply(
-            lambda v: (
-                v
-                if v is not None
-                else float("inf")
-            )
-        )
-    )
-
-    df["_sort_score"] = (
-        pd.to_numeric(
-            df["acceptance_score"],
-            errors="coerce"
-        ).fillna(0)
-    )
-
+    # 거리 정보가 없는 병원(위경도 미확보)은 맨 뒤로 보낸다.
+    df["_sort_distance"] = distance_values.fillna(float("inf"))
+    df["_sort_score"] = pd.to_numeric(df["acceptance_score"], errors="coerce").fillna(0)
+    # pandas의 기본 정렬(quicksort)은 동률(예: 거리 정보가 없어 전부 inf인 경우)에서
+    # 안정 정렬을 보장하지 않아 수용점수 순서가 뒤섞이는 문제가 있었다.
+    # 따라서 수용점수를 명시적인 2차 정렬 기준으로 지정해, 거리가 같거나 없을 때는
+    # 항상 수용점수가 높은 병원이 먼저 오도록 고정한다.
     df = df.sort_values(
-        by=[
-            "_sort_distance",
-            "_sort_score",
-        ],
-        ascending=[
-            True,
-            False,
-        ],
+        by=["_sort_distance", "_sort_score"],
+        ascending=[True, False],
         kind="mergesort",
-    ).drop(
-        columns=[
-            "_sort_distance",
-            "_sort_score",
-        ]
+    ).drop(columns=["_sort_distance", "_sort_score"])
+    df["model_rank_explanation"] = df["distance_km"].apply(
+        lambda v: f"구급차 위치로부터 약 {v}km" if v is not None else "거리 정보 없음(병원 좌표 미확보)"
     )
+    return df.reset_index(drop=True)
 
-    df[
-        "model_rank_explanation"
-    ] = df[
-        "distance_km"
-    ].apply(
-        lambda v: (
-            f"구급차 위치로부터 약 {v}km"
-            if v is not None
-            else (
-                "거리 정보 없음"
-                "(병원 좌표 미확보)"
-            )
-        )
-    )
-
-    return df.reset_index(
-        drop=True
-    )
 
 
 def rank_model_b(acceptable_df, patient=None, weights=None):
-    """Model B: 치료 지연, 데이터 신뢰도 및 골든타임 패널티를 반영한 MILP 순위 산정."""
+    """
+    Model B: MILP(혼합정수선형계획) 기반 단일 환자 순위 산정.
+
+    공통 Hard Filter를 통과한 전체 병원을 대상으로, 매 반복마다
+      maximize  sum_h x_h * utility_h
+      s.t.      sum_h x_h == 1,  x_h ∈ {0,1},  (이미 선택된 병원 제외)
+    형태의 0/1 정수계획 문제를 풀어 순위를 만든다.
+
+    utility는 단순 거리가 아니라 예상 치료시작 지연, 수용점수,
+    전문의 수, 데이터 신뢰도와 골든타임 초과 패널티를 반영한다.
+    다중 환자의 병상 경쟁은 optimize_batch_assignments에서 처리한다.
+    """
     if acceptable_df.empty:
         return acceptable_df
 
@@ -2289,10 +2496,17 @@ def rank_model_b(acceptable_df, patient=None, weights=None):
         - 0.25 * profile["severity_weight"] * df["_golden_violation"]
     )
 
+    # Model B의 원래 순위 기준은 MILP utility이다.
+    # 화면에는 utility의 순서를 보존한 0~100 "추천 점수"로만 표시한다.
+    df["model_score"] = (_normalize_series(df["_utility"], higher_is_better=True) * 100.0).round(2)
+    df["model_score_raw"] = df["_utility"].round(6)
+    df["model_score_label"] = "Model B MILP 추천 점수"
+
     remaining_idx = list(df.index)
     ranked_idx = []
 
     if PULP_AVAILABLE:
+        # 후보를 하나씩 제외해가며 0/1 MILP를 반복적으로 풀어 전체 순위를 만든다.
         while remaining_idx:
             prob = pulp.LpProblem("hospital_assignment", pulp.LpMaximize)
             x = {i: pulp.LpVariable(f"x_{i}", cat="Binary") for i in remaining_idx}
@@ -2304,6 +2518,9 @@ def rank_model_b(acceptable_df, patient=None, weights=None):
             ranked_idx.append(chosen)
             remaining_idx.remove(chosen)
     else:
+        # pulp 미설치 시: utility 내림차순 정렬 = 위 MILP를 반복해서 푼 것과 동일한 결과.
+        # quicksort는 동률(utility가 같은 경우)에서 안정 정렬을 보장하지 않으므로
+        # mergesort(안정 정렬) + 수용점수 2차 기준으로 순서를 고정한다.
         df["_sort_score"] = pd.to_numeric(df["acceptance_score"], errors="coerce").fillna(0)
         ranked_idx = df.sort_values(
             by=["_utility", "_sort_score"],
@@ -2328,81 +2545,9 @@ def rank_model_b(acceptable_df, patient=None, weights=None):
     return df.reset_index(drop=True)
 
 
-def get_topsis_criteria(variant=DEFAULT_TOPSIS_VARIANT, patient=None):
-    """C0~C3 변형 TOPSIS 기준을 추출합니다."""
-    variant = str(variant or DEFAULT_TOPSIS_VARIANT).strip().upper()
-    if variant not in TOPSIS_VARIANTS:
-        raise ValueError(f"알 수 없는 TOPSIS 변형입니다: {variant}")
-
-    config = TOPSIS_VARIANTS[variant]
-    base = TOPSIS_VARIANTS[config["criteria_from"]]["criteria"] if config.get("criteria_from") else config["criteria"]
-
-    criteria = {name: {"benefit": bool(v["benefit"]), "weight": float(v["weight"])} for name, v in base.items()}
-
-    profile = None
-    if config.get("patient_aware"):
-        profile = get_patient_priority_profile(patient or {})
-        profile_weights = config["weight_profiles"][profile["name"]]
-        for name in criteria:
-            criteria[name]["weight"] = float(profile_weights[name])
-            
-    weight_sum = sum(values["weight"] for values in criteria.values())
-    if not math.isclose(weight_sum, 1.0, abs_tol=1e-9):
-        raise ValueError(f"{variant} TOPSIS 가중치 합이 1이 아닙니다: {weight_sum}")
-
-    return criteria, profile
-
-
-def get_topsis_variant_metadata(variant=DEFAULT_TOPSIS_VARIANT, patient=None):
-    """TOPSIS 변형 메타데이터 구조 생성."""
-    variant = str(variant or DEFAULT_TOPSIS_VARIANT).strip().upper()
-    criteria, profile = get_topsis_criteria(variant, patient)
-    config = TOPSIS_VARIANTS[variant]
-    return {
-        "key": variant,
-        "label": config["label"],
-        "description": config["description"],
-        "experimental": bool(config.get("experimental", False)),
-        "patient_profile": profile["name"] if profile else None,
-        "criteria": [
-            {"name": k, "direction": "benefit" if v["benefit"] else "cost", "weight": v["weight"]}
-            for k, v in criteria.items()
-        ],
-    }
-
-
-def _topsis_closeness(df, criteria):
-    """공통 TOPSIS 순수 계산 엔진."""
-    if df.empty:
-        return pd.Series(dtype=float, index=df.index)
-    
-    missing_columns = [name for name in criteria if name not in df.columns]
-    if missing_columns:
-        raise KeyError(f"TOPSIS 기준 컬럼이 없습니다: {', '.join(missing_columns)}")
-
-    matrix = pd.DataFrame(index=df.index)
-    for column, config in criteria.items():
-        values = pd.to_numeric(df[column], errors="coerce")
-        fill_value = (values.min() if config["benefit"] else values.max()) if values.notna().any() else 0.0
-        matrix[column] = values.fillna(fill_value)
-
-    vector_norm = np.sqrt((matrix ** 2).sum()).replace(0, np.nan)
-    normalized = matrix.divide(vector_norm, axis=1).fillna(0.0)
-    weighted = normalized.copy()
-    for column, config in criteria.items():
-        weighted[column] = normalized[column] * float(config["weight"])
-
-    ideal_best = {k: weighted[k].max() if v["benefit"] else weighted[k].min() for k, v in criteria.items()}
-    ideal_worst = {k: weighted[k].min() if v["benefit"] else weighted[k].max() for k, v in criteria.items()}
-
-    distance_best = np.sqrt(sum((weighted[k] - ideal_best[k]) ** 2 for k in criteria))
-    distance_worst = np.sqrt(sum((weighted[k] - ideal_worst[k]) ** 2 for k in criteria))
-    denominator = (distance_best + distance_worst).replace(0, np.nan)
-    return (distance_worst / denominator).fillna(0.5)
-
 
 def rank_model_c(acceptable_df, patient=None, variant=DEFAULT_TOPSIS_VARIANT):
-    """C0/C1/C2/C3 변형 TOPSIS 적용 순위."""
+    """C0/C1/C2/C3 설정과 공통 엔진을 사용하는 Model C TOPSIS 순위."""
     if acceptable_df.empty:
         return acceptable_df
 
@@ -2410,16 +2555,30 @@ def rank_model_c(acceptable_df, patient=None, variant=DEFAULT_TOPSIS_VARIANT):
     variant = str(variant or DEFAULT_TOPSIS_VARIANT).strip().upper()
     criteria, profile = get_topsis_criteria(variant, patient)
     metadata = get_topsis_variant_metadata(variant, patient)
-
     df = acceptable_df.copy()
     df["_topsis_closeness"] = _topsis_closeness(df, criteria)
+    # Model C의 원래 순위 기준은 TOPSIS closeness이다.
+    # 화면에는 같은 순서를 유지하도록 100배한 "추천 점수"로 표시한다.
+    df["model_score"] = (df["_topsis_closeness"] * 100.0).round(2)
+    df["model_score_raw"] = df["_topsis_closeness"].round(6)
+    df["model_score_label"] = f"Model C TOPSIS {variant} 추천 점수"
+
+    # 결정 기준 외의 수용점수가 동률 순위에 숨어들지 않도록
+    # 병원명을 공통·중립적 2차 정렬 기준으로 사용한다.
     df["_hospital_name_tiebreaker"] = df.apply(get_hospital_name, axis=1)
-    df = df.sort_values(by=["_topsis_closeness", "_hospital_name_tiebreaker"], ascending=[False, True], kind="mergesort")
+    df = df.sort_values(
+        by=["_topsis_closeness", "_hospital_name_tiebreaker"],
+        ascending=[False, True],
+        kind="mergesort",
+    )
 
     profile_text = f", {profile['label']} 가중치" if profile else ""
     experimental_text = ", 실험안" if metadata["experimental"] else ""
     df["model_rank_explanation"] = df["_topsis_closeness"].apply(
-        lambda v: f"TOPSIS {variant} 근접도 {round(float(v), 3)} ({metadata['label']}{profile_text}{experimental_text})"
+        lambda value: (
+            f"TOPSIS {variant} 근접도 {round(float(value), 3)} "
+            f"({metadata['label']}{profile_text}{experimental_text})"
+        )
     )
     df["topsis_closeness"] = df["_topsis_closeness"].round(6)
     df["topsis_variant"] = variant
@@ -2429,322 +2588,306 @@ def rank_model_c(acceptable_df, patient=None, variant=DEFAULT_TOPSIS_VARIANT):
     return df.reset_index(drop=True)
 
 
-def apply_ranking_model(model_key, acceptable_df, patient=None, topsis_variant=DEFAULT_TOPSIS_VARIANT):
-    model_key = (model_key or "A").strip().upper()
-    if model_key == "B": return rank_model_b(acceptable_df, patient=patient), "B"
-    if model_key == "C": return rank_model_c(acceptable_df, patient=patient, variant=topsis_variant), "C"
-    if model_key == "D": return rank_model_d(acceptable_df), "D"
-    return rank_model_a(acceptable_df), "A"
 
-
-# 다중 환자 배치용 함수 구현체
-def _batch_hospital_key(hospital, fallback_index=None):
-    hpid = str(hospital.get("hpid") or "").strip()
-    if hpid and hpid.lower() != "nan": return f"hpid:{hpid}"
-    name = get_hospital_name(hospital)
-    lat, lng = get_hospital_lat_lng(hospital)
-    if lat is not None and lng is not None:
-        return f"name:{name}|{round(float(lat), 5)}|{round(float(lng), 5)}"
-    return f"name:{name}|row:{fallback_index if fallback_index is not None else 'unknown'}"
-
-
-def _batch_capacity(hospital):
-    hvec = to_number(hospital.get("hvec"))
-    return max(1, int(math.floor(hvec))) if hvec is not None else 1
-
-
-def _assignment_cost(candidate, patient):
-    profile = get_patient_priority_profile(patient)
-    delay = to_number(candidate.get("effective_treatment_delay_min"))
-    delay = 999.0 if delay is None else delay
-    clinical = min(1.0, max(0.0, (to_number(candidate.get("acceptance_score")) or 0.0) / 100.0))
-    reliability = min(1.0, max(0.0, to_number(candidate.get("data_reliability_score")) or 0.0))
-    return profile["severity_weight"] * (delay + 35.0 * (1.0 - clinical) + 12.0 * (1.0 - reliability))
-
-
-def solve_batch_candidate_assignment(candidate_rows_by_patient, patients_by_id):
-    patient_ids = list(patients_by_id)
-    capacities, candidate_lookup = {}, {}
-
-    for patient_id in patient_ids:
-        for candidate in candidate_rows_by_patient.get(patient_id, []):
-            hospital_id = candidate["_batch_hospital_id"]
-            candidate_lookup[(patient_id, hospital_id)] = candidate
-            capacities[hospital_id] = max(capacities.get(hospital_id, 0), int(candidate.get("_batch_capacity", 1)))
-
-    assignments = []
-    solver_name = "pulp_cbc" if PULP_AVAILABLE else "severity_greedy_fallback"
-    objective_value = None
-
-    if PULP_AVAILABLE:
-        problem = pulp.LpProblem("multi_patient_hospital_assignment", pulp.LpMinimize)
-        x = {key: pulp.LpVariable(f"x_{p_idx}_{h_idx}", cat="Binary") for p_idx, key in enumerate(candidate_lookup) for h_idx in [0]}
-        unassigned = {patient_id: pulp.LpVariable(f"unassigned_{idx}", cat="Binary") for idx, patient_id in enumerate(patient_ids)}
-        late = {patient_id: pulp.LpVariable(f"late_{idx}", lowBound=0) for idx, patient_id in enumerate(patient_ids)}
-
-        for patient_id in patient_ids:
-            patient_keys = [key for key in candidate_lookup if key[0] == patient_id]
-            problem += pulp.lpSum(x[key] for key in patient_keys) + unassigned[patient_id] == 1
-            golden_time = to_number(patients_by_id[patient_id].get("golden_time_min"))
-            if golden_time and patient_keys:
-                problem += late[patient_id] >= pulp.lpSum(
-                    ((to_number(candidate_lookup[key].get("effective_treatment_delay_min")) or 999.0) - golden_time) * x[key]
-                    for key in patient_keys
-                )
-            else:
-                problem += late[patient_id] == 0
-
-        for hospital_id, capacity in capacities.items():
-            hospital_keys = [key for key in candidate_lookup if key[1] == hospital_id]
-            problem += pulp.lpSum(x[key] for key in hospital_keys) <= capacity
-
-        assignment_cost = pulp.lpSum(_assignment_cost(candidate_lookup[k], patients_by_id[k[0]]) * x[k] for k in candidate_lookup)
-        late_cost = pulp.lpSum(6.0 * get_patient_priority_profile(patients_by_id[p_id])["severity_weight"] * late[p_id] for p_id in patient_ids)
-        unassigned_cost = pulp.lpSum(10000.0 * get_patient_priority_profile(patients_by_id[p_id])["severity_weight"] * unassigned[p_id] for p_id in patient_ids)
-        problem += assignment_cost + late_cost + unassigned_cost
-        problem.solve(pulp.PULP_CBC_CMD(msg=False))
-        objective_value = pulp.value(problem.objective)
-
-        for patient_id in patient_ids:
-            chosen_key = next((k for k in candidate_lookup if k[0] == patient_id and (pulp.value(x[k]) or 0) > 0.5), None)
-            assignments.append((patient_id, candidate_lookup.get(chosen_key) if chosen_key else None))
-    else:
-        remaining_capacity = dict(capacities)
-        ordered_patients = sorted(patient_ids, key=lambda p_id: get_patient_priority_profile(patients_by_id[p_id])["severity_weight"], reverse=True)
-        greedy_result = {}
-        for patient_id in ordered_patients:
-            available = [c for c in candidate_rows_by_patient.get(patient_id, []) if remaining_capacity.get(c["_batch_hospital_id"], 0) > 0]
-            chosen = min(available, key=lambda row: _assignment_cost(row, patients_by_id[patient_id])) if available else None
-            greedy_result[patient_id] = chosen
-            if chosen: remaining_capacity[chosen["_batch_hospital_id"]] -= 1
-        assignments = [(p_id, greedy_result.get(p_id)) for p_id in patient_ids]
-
-    output = []
-    for patient_id, candidate in assignments:
-        patient = patients_by_id[patient_id]
-        if candidate is None:
-            output.append({"patient_id": patient_id, "assigned": False, "reason": "임상 적합 후보 또는 가용 병상이 없어 수동 조정이 필요합니다."})
-            continue
-
-        effective_delay = to_number(candidate.get("effective_treatment_delay_min"))
-        golden_time = to_number(patient.get("golden_time_min"))
-        output.append({
-            "patient_id": patient_id,
-            "assigned": True,
-            "hospital_id": candidate["_batch_hospital_id"],
-            "hospital_name": get_hospital_name(candidate),
-            "hospital_capacity": candidate.get("_batch_capacity"),
-            "eta_min": candidate.get("eta_min"),
-            "effective_treatment_delay_min": effective_delay,
-            "golden_time_min": golden_time,
-            "golden_time_violation_min": round(max(0.0, effective_delay - golden_time), 1) if effective_delay is not None and golden_time else None,
-            "acceptance_score": candidate.get("acceptance_score"),
-            "estimated_acceptance_probability": candidate.get("estimated_acceptance_probability"),
-            "data_reliability_score": candidate.get("data_reliability_score"),
-            "assignment_cost": round(_assignment_cost(candidate, patient), 3),
-        })
-
-    return {
-        "solver": solver_name,
-        "objective_value": round(float(objective_value), 3) if objective_value is not None else None,
-        "patient_count": len(patient_ids),
-        "assigned_count": sum(1 for item in output if item["assigned"]),
-        "unassigned_count": sum(1 for item in output if not item["assigned"]),
-        "assignments": output,
-    }
-
-
-def optimize_batch_assignments(patient_requests, hospital_df):
-    """다중 환자 병상 배치 최적화 진입점 함수."""
-    hospitals = hospital_df.copy().reset_index(drop=True)
-    hospitals["_batch_hospital_id"] = [_batch_hospital_key(row, idx) for idx, row in hospitals.iterrows()]
-
-    patients_by_id, candidate_rows_by_patient = {}, {}
-    for index, item in enumerate(patient_requests):
-        patient_id = str(item.get("patient_id") or f"patient-{index + 1}")
-        if patient_id in patients_by_id:
-            raise ValueError(f"중복된 patient_id입니다: {patient_id}")
-        patient = enrich_patient_by_category(item["patient"])
-        patients_by_id[patient_id] = patient
-        amb_lat = to_number(item.get("ambulance_lat")) or DEFAULT_AMBULANCE_LAT
-        amb_lng = to_number(item.get("ambulance_lng")) or DEFAULT_AMBULANCE_LNG
-
-        acceptable_df, _, _ = filter_acceptable_hospitals(hospitals, patient)
-        acceptable_df = attach_routing_fields(acceptable_df, amb_lat, amb_lng, patient=patient)
-        if acceptable_df.empty:
-            candidate_rows_by_patient[patient_id] = []
-            continue
-
-        acceptable_df["_batch_capacity"] = acceptable_df.apply(_batch_capacity, axis=1)
-        candidate_rows_by_patient[patient_id] = acceptable_df.to_dict(orient="records")
-
-    return solve_batch_candidate_assignment(candidate_rows_by_patient, patients_by_id)
-
-def rank_model_d(
-    acceptable_df,
-    weights=None
-):
+def rank_model_d(acceptable_df, weights=None):
     """
-    Model D:
-    가중치 종합 점수.
-    """
+    Model D: 가중치 종합 점수 (Weighted Sum Model).
 
+    수용점수/이동거리/전문의 수/혼잡도를 각각 0~1로 min-max 정규화한 뒤
+    사전에 정의한 가중치로 단순 선형 합산한다. TOPSIS(Model C)와 달리
+    이상해까지의 거리를 계산하지 않고, "가중치 x 정규화값"을 그대로 더하는
+    가장 단순한 다기준 의사결정 방식이다.
+    """
     if acceptable_df.empty:
         return acceptable_df
 
-    weights = weights or {
-        "score": 0.45,
-        "distance": 0.25,
-        "specialist": 0.15,
-        "congestion": 0.15,
-    }
+    weights = weights or {"score": 0.45, "distance": 0.25, "specialist": 0.15, "congestion": 0.15}
 
     df = acceptable_df.copy()
+    norm_score = _normalize_series(df["acceptance_score"], higher_is_better=True)
+    norm_distance = _normalize_series(df["distance_km"], higher_is_better=False)
+    norm_specialist = _normalize_series(df["required_specialist_count_total"], higher_is_better=True)
+    norm_congestion = _normalize_series(df["congestion_score"], higher_is_better=False)
 
-    norm_score = (
-        _normalize_series(
-            df["acceptance_score"],
-            higher_is_better=True
-        )
+    df["_weighted_total"] = (
+        weights["score"] * norm_score
+        + weights["distance"] * norm_distance
+        + weights["specialist"] * norm_specialist
+        + weights["congestion"] * norm_congestion
     )
+    # Model D의 원래 순위 기준은 개선 ver_0920의 가중합 값이다.
+    # 화면에는 같은 순서를 유지하도록 100배한 "추천 점수"로 표시한다.
+    df["model_score"] = (df["_weighted_total"] * 100.0).round(2)
+    df["model_score_raw"] = df["_weighted_total"].round(6)
+    df["model_score_label"] = "Model D 가중합 추천 점수"
+    df["weighted_sum_score"] = df["_weighted_total"].round(6)
 
-    norm_distance = (
-        _normalize_series(
-            df["distance_km"],
-            higher_is_better=False
-        )
-    )
-
-    norm_specialist = (
-        _normalize_series(
-            df[
-                "required_specialist_count_total"
-            ],
-            higher_is_better=True
-        )
-    )
-
-    norm_congestion = (
-        _normalize_series(
-            df["congestion_score"],
-            higher_is_better=False
-        )
-    )
-
-    df[
-        "_weighted_total"
-    ] = (
-        weights["score"]
-        * norm_score
-        + weights["distance"]
-        * norm_distance
-        + weights["specialist"]
-        * norm_specialist
-        + weights["congestion"]
-        * norm_congestion
-    )
-
-    df["_sort_score"] = (
-        pd.to_numeric(
-            df["acceptance_score"],
-            errors="coerce"
-        ).fillna(0)
-    )
-
+    df["_sort_score"] = pd.to_numeric(df["acceptance_score"], errors="coerce").fillna(0)
     df = df.sort_values(
-        by=[
-            "_weighted_total",
-            "_sort_score",
-        ],
-        ascending=[
-            False,
-            False,
-        ],
+        by=["_weighted_total", "_sort_score"],
+        ascending=[False, False],
         kind="mergesort",
     )
-
-    df[
-        "model_rank_explanation"
-    ] = df[
-        "_weighted_total"
-    ].apply(
-        lambda v: (
-            "가중합 종합점수 "
-            f"{round(float(v), 3)} "
-            "(수용점수 45% · 거리 25% · "
-            "전문의수 15% · 혼잡도 15%)"
-        )
+    df["model_rank_explanation"] = df["_weighted_total"].apply(
+        lambda v: f"가중합 종합점수 {round(float(v), 3)} (수용점수 45% · 거리 25% · 전문의수 15% · 혼잡도 15%)"
     )
+    df = df.drop(columns=["_weighted_total", "_sort_score"])
+    return df.reset_index(drop=True)
 
-    df = df.drop(
-        columns=[
-            "_weighted_total",
-            "_sort_score",
-        ]
-    )
 
-    return df.reset_index(
-        drop=True
+
+def apply_ranking_model(model_key, acceptable_df, patient=None, topsis_variant=DEFAULT_TOPSIS_VARIANT):
+    model_key = (model_key or "A").strip().upper()
+
+    if model_key == "B":
+        ranked, applied = rank_model_b(acceptable_df, patient=patient), "B"
+    elif model_key == "C":
+        ranked, applied = rank_model_c(acceptable_df, patient=patient, variant=topsis_variant), "C"
+    elif model_key == "D":
+        ranked, applied = rank_model_d(acceptable_df), "D"
+    else:
+        # 기본값 / 잘못된 값이 들어온 경우 Model A로 안전하게 대체
+        ranked, applied = rank_model_a(acceptable_df), "A"
+
+    # 표시되는 추천 점수와 표 순서가 어긋나지 않도록 안정 정렬한다.
+    # model_score는 각 모델의 원래 순위 기준을 단조 변환한 값이라 기존 모델 순위를 바꾸지 않는다.
+    if not ranked.empty and "model_score" in ranked.columns:
+        ranked = ranked.sort_values("model_score", ascending=False, kind="mergesort").reset_index(drop=True)
+    return ranked, applied
+
+
+def apply_golden_time_safety_priority(ranked_df, patient=None):
+    """
+    응급의료 시스템 공통 안전 우선순위.
+
+    A/B/C/D의 내부 계산식과 각 모델이 만든 원래 순서는 그대로 둔 채,
+    환자의 golden_time_min 안에 도착 가능한 병원을 먼저 배치한다.
+
+    - ETA <= golden_time: 골든타임 내
+    - ETA >  golden_time: 골든타임 초과
+    - ETA 미확인: ETA 미확인
+
+    최종 화면의 '추천 점수'와 순위가 다시 어긋나지 않도록,
+    원래 모델 점수는 model_score_native에 보존하고 화면용 model_score만
+    안전 우선순위를 보존하는 단조 점수로 다시 만든다.
+    모델 고유 원시값(model_score_raw / topsis_closeness / milp_utility_score 등)은 변경하지 않는다.
+    """
+    if ranked_df.empty:
+        return ranked_df.copy(), False
+
+    patient = patient or {}
+    golden_time = to_number(patient.get("golden_time_min"))
+    if golden_time is None or golden_time <= 0 or "eta_min" not in ranked_df.columns:
+        out = ranked_df.copy()
+        out["golden_time_status"] = "미적용"
+        out["golden_time_exceeded"] = False
+        return out, False
+
+    out = ranked_df.copy().reset_index(drop=True)
+    eta = pd.to_numeric(out["eta_min"], errors="coerce")
+
+    # 모델 자체가 만든 순서를 동일 그룹 안의 2차 기준으로 그대로 보존한다.
+    out["_native_model_order"] = np.arange(len(out), dtype=int)
+    out["model_score_native"] = pd.to_numeric(out.get("model_score"), errors="coerce")
+
+    within = eta.notna() & (eta <= float(golden_time))
+    over = eta.notna() & (eta > float(golden_time))
+
+    out["golden_time_status"] = np.select(
+        [within, over],
+        ["골든타임 내", "골든타임 초과"],
+        default="ETA 미확인",
     )
+    out["golden_time_exceeded"] = over
+
+    # 0: 골든타임 내, 1: 초과, 2: ETA 미확인
+    # 외부 교통 API가 실패했다고 병원을 탈락시키지는 않되, 확인 가능한 안전 후보를 먼저 보여준다.
+    out["_golden_priority"] = np.select([within, over], [0, 1], default=2).astype(int)
+    out = out.sort_values(
+        by=["_golden_priority", "_native_model_order"],
+        ascending=[True, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    # 안전 우선순위 적용 후에도 화면 점수가 최종 순서와 일치하도록 표시용 점수만 재매핑한다.
+    # 각 안전 그룹 내부에서는 기존 모델 점수의 순서를 그대로 유지한다.
+    native_score = pd.to_numeric(out["model_score_native"], errors="coerce")
+    native_norm = _normalize_series(native_score.fillna(0), higher_is_better=True)
+    priority_bonus = (2 - out["_golden_priority"]) * 2.0
+    safety_key = priority_bonus + native_norm
+    out["model_score"] = (_normalize_series(safety_key, higher_is_better=True) * 100.0).round(2)
+
+    if "model_score_label" in out.columns:
+        out["model_score_label"] = out["model_score_label"].astype(str) + " · 골든타임 우선"
+
+    out = out.drop(columns=["_golden_priority", "_native_model_order"])
+    return out, True
+
 
 
 # =========================================================
 # 5-3. 시스템 성능 검증 지표
 # =========================================================
 
-def compute_performance_metrics(result_df, acceptable_df, top_df, patient, elapsed_ms):
-    total = len(result_df)
-    acceptable_count = len(acceptable_df)
-
-    acceptance_success_rate = round((acceptable_count / total) * 100, 1) if total else 0.0
-
-    golden_time = to_number(patient.get("golden_time_min"))
-    eta_series = pd.to_numeric(top_df["eta_min"], errors="coerce").dropna() if "eta_min" in top_df else pd.Series(dtype=float)
-    treatment_delay_series = (
-        pd.to_numeric(top_df["effective_treatment_delay_min"], errors="coerce").dropna()
-        if "effective_treatment_delay_min" in top_df
-        else pd.Series(dtype=float)
+def compute_performance_metrics(
+    result_df,
+    acceptable_df,
+    top_df,
+    patient,
+    elapsed_ms
+):
+    total = len(
+        result_df
     )
 
-    if golden_time and not treatment_delay_series.empty:
-        within_golden = (treatment_delay_series <= golden_time).sum()
-        golden_time_compliance_rate = round((within_golden / len(treatment_delay_series)) * 100, 1)
+    acceptable_count = len(
+        acceptable_df
+    )
+
+    acceptance_success_rate = (
+        round(
+            (
+                acceptable_count
+                / total
+            )
+            * 100,
+            1
+        )
+        if total
+        else 0.0
+    )
+
+    golden_time = to_number(
+        patient.get(
+            "golden_time_min"
+        )
+    )
+
+    # ETA 계열 지표는 선택 모델이 실제로 추천한 Top-K를 기준으로 계산한다.
+    # 후보 전체를 쓰면 A/B/C/D를 바꿔도 값이 거의 동일해져 모델 비교 지표로 의미가 약해진다.
+    if (
+        top_df is not None
+        and "eta_min" in top_df
+    ):
+        eta_series = (
+            pd.to_numeric(
+                top_df["eta_min"],
+                errors="coerce"
+            ).dropna()
+        )
+    else:
+        eta_series = pd.Series(dtype=float)
+
+    if (
+        golden_time
+        and not eta_series.empty
+    ):
+        within_golden = (
+            eta_series
+            <= golden_time
+        ).sum()
+
+        golden_time_compliance_rate = round(
+            (
+                within_golden
+                / len(eta_series)
+            )
+            * 100,
+            1
+        )
+
     else:
         golden_time_compliance_rate = None
 
-    avg_eta = round(float(eta_series.mean()), 1) if not eta_series.empty else None
-    p95_eta = round(float(np.percentile(eta_series, 95)), 1) if len(eta_series) > 0 else None
-    avg_treatment_delay = round(float(treatment_delay_series.mean()), 1) if not treatment_delay_series.empty else None
+    avg_eta = (
+        round(
+            float(
+                eta_series.mean()
+            ),
+            1
+        )
+        if not eta_series.empty
+        else None
+    )
 
-    top1_acceptance_probability = None
-    top1_treatment_delay = None
-    if not top_df.empty:
-        top1_acceptance_probability = to_number(top_df.iloc[0].get("estimated_acceptance_probability"))
-        top1_treatment_delay = to_number(top_df.iloc[0].get("effective_treatment_delay_min"))
+    p95_eta = (
+        round(
+            float(
+                np.percentile(
+                    eta_series,
+                    95
+                )
+            ),
+            1
+        )
+        if len(eta_series) > 0
+        else None
+    )
 
-    congestion_series = pd.to_numeric(top_df["congestion_score"], errors="coerce").dropna() if "congestion_score" in top_df else pd.Series(dtype=float)
-    avg_congestion_pct = round(float(congestion_series.mean()) * 100, 1) if not congestion_series.empty else None
+    if (
+        "congestion_score"
+        in top_df
+    ):
+        congestion_series = (
+            pd.to_numeric(
+                top_df[
+                    "congestion_score"
+                ],
+                errors="coerce"
+            ).dropna()
+        )
+
+    else:
+        congestion_series = (
+            pd.Series(
+                dtype=float
+            )
+        )
+
+    avg_congestion_pct = (
+        round(
+            float(
+                congestion_series.mean()
+            )
+            * 100,
+            1
+        )
+        if not congestion_series.empty
+        else None
+    )
 
     return {
-        "acceptance_success_rate_pct": acceptance_success_rate,
-        "golden_time_compliance_rate_pct": golden_time_compliance_rate,
+        "acceptance_success_rate_pct": (
+            acceptance_success_rate
+        ),
+        "golden_time_compliance_rate_pct": (
+            golden_time_compliance_rate
+        ),
         "avg_eta_min": avg_eta,
         "p95_eta_min": p95_eta,
-        "avg_effective_treatment_delay_min": avg_treatment_delay,
-        "top1_effective_treatment_delay_min": round(top1_treatment_delay, 1) if top1_treatment_delay is not None else None,
-        "top1_estimated_acceptance_probability_pct": (
-            round(top1_acceptance_probability * 100, 1) if top1_acceptance_probability is not None else None
+        "hospital_congestion_pct": (
+            avg_congestion_pct
         ),
-        "hospital_congestion_pct": avg_congestion_pct,
-        "computation_time_ms": round(elapsed_ms, 1),
+        "computation_time_ms": round(
+            elapsed_ms,
+            1
+        ),
         "excluded_metrics": [
             {
                 "name": "재매칭률",
-                "reason": "병원의 실제 거절/재요청 이력을 받는 연동이 아직 없어 항상 0으로만 계산되어 의미가 없습니다.",
+                "reason": (
+                    "병원의 실제 거절/재요청 이력을 "
+                    "받는 연동이 아직 없어 항상 "
+                    "0으로만 계산되어 의미가 없습니다."
+                ),
             },
             {
                 "name": "도착 시 수용률",
-                "reason": "구급차 도착 시점의 병원 최종 확정 응답을 받는 연동이 아직 없어 계산할 수 없습니다.",
+                "reason": (
+                    "구급차 도착 시점의 병원 최종 "
+                    "확정 응답을 받는 연동이 아직 없어 "
+                    "계산할 수 없습니다."
+                ),
             },
         ],
     }
@@ -2930,7 +3073,6 @@ def enrich_patient_by_category(
             "소아",
             "신생아",
             "영아",
-            "탈수",
         ]
     ):
         add_specialist(
@@ -3752,7 +3894,6 @@ def check_special_diag(
             "소아",
             "신생아",
             "영아",
-            "탈수",
         ]
     ):
         keyword_sets = [
@@ -4366,285 +4507,162 @@ def filter_acceptable_hospitals(
 # 9. 환자 분석 + 병원 수용 가능 여부 판별 API
 # =========================================================
 
-@app.route("/api/recommend-hospitals", methods=["POST"])
+@app.route(
+    "/api/recommend-hospitals",
+    methods=["POST"]
+)
 def recommend_hospitals_api():
     start_time = time.perf_counter()
 
     try:
-        data = request.get_json()
-        if not data or "text" not in data:
-            return jsonify({"success": False, "error": "text가 필요합니다."}), 400
+        data = request.get_json(silent=True) or {}
+        supplied_patient = data.get("patient")
+        text = str(data.get("text") or "").strip()
 
-        raw_patient = analyze_patient(data["text"])
+        if supplied_patient:
+            # A/B/C/D 비교 시 첫 Groq PatientInfo 결과를 그대로 재사용한다.
+            raw_patient = PatientInfo.model_validate(supplied_patient).model_dump()
+            patient_analysis_reused = True
+        else:
+            if not text:
+                return jsonify({"success": False, "error": "text 또는 patient가 필요합니다."}), 400
+            cached_patient = get_cached_patient_analysis(text)
+            if cached_patient is not None:
+                raw_patient = cached_patient
+                patient_analysis_reused = True
+            else:
+                raw_patient = analyze_patient(text)
+                patient_analysis_reused = False
+
         patient = enrich_patient_by_category(raw_patient)
-        
-        
         ambulance_lat = to_number(data.get("ambulance_lat")) or DEFAULT_AMBULANCE_LAT
         ambulance_lng = to_number(data.get("ambulance_lng")) or DEFAULT_AMBULANCE_LNG
-        
-            
         model_key = data.get("model", "A")
-        topsis_variant = str(data.get("topsis_variant") or DEFAULT_TOPSIS_VARIANT).strip().upper()
+        topsis_variant = data.get("topsis_variant", DEFAULT_TOPSIS_VARIANT)
 
         hospital_df, excel_file, sheet_name = load_hospital_db()
-        acceptable_df, rejected_df, result_df = filter_acceptable_hospitals(hospital_df, patient)
-        ''' ----------------------------------------------------------------------------------------------------------------원래
-        # 환자 정보(patient)를 인자로 추가 전달하여 운영 지연 및 가중치를 반영합니다.
-        acceptable_df = attach_routing_fields(acceptable_df, ambulance_lat, ambulance_lng, patient=patient)
-        rejected_df = attach_routing_fields(rejected_df, ambulance_lat, ambulance_lng, patient=patient)
+        acceptable_all_df, rejected_df, result_df = filter_acceptable_hospitals(hospital_df, patient)
 
-        # TOPSIS 변형 및 환자 중증도 정보를 반영합니다.
-        ranked_acceptable_df, applied_model_key = apply_ranking_model(
-            model_key,
-            acceptable_df,
-            patient=patient,
-            topsis_variant=topsis_variant,
-        )
-        '''
-        acceptable_df = attach_routing_fields(
-            acceptable_df,
-            ambulance_lat,
-            ambulance_lng,
-            patient=patient
-            )     
+        # Hard Filter 통과 수는 전체 후보 기준으로 유지한다.
+        # 미확인(U)은 기존 로직대로 수용 가능 후보에 남고,
+        # 명확한 불충족(N)만 rejected_df(수용 불가)로 분리된다.
+        hard_filter_acceptable_count = len(acceptable_all_df)
 
-        rejected_df = attach_routing_fields(
-            rejected_df,
-            ambulance_lat,
-            ambulance_lng,
-            patient=patient
-        )
-
-        # ---------------------------------------------------------
-        # TOP 10 추천에는 카카오 실제 경로값이 확인된 병원만 사용
-        # eta_is_routed=True:
-        #   카카오모빌리티 실제 경로 API로 거리/ETA를 계산한 병원
-        #  
-        # eta_is_routed=False:
-        #   직선거리 기반 fallback 값만 있는 병원
-        # ---------------------------------------------------------
-        routed_acceptable_df = acceptable_df[
-            acceptable_df["eta_is_routed"] == True
-        ].copy()
-
-        # 카카오 실제 경로값이 있는 병원만 순위 산정
-        ranked_acceptable_df, applied_model_key = apply_ranking_model(
-            model_key,
-            routed_acceptable_df,
-            patient=patient,
-            topsis_variant=topsis_variant,
-        )
-        
-        # =========================================================
-        # 최종 TOP 10
-        # =========================================================
-
-        # =========================================================
-        # 최종 TOP 10
-        # =========================================================
-
-        top_acceptable_df = ranked_acceptable_df.head(10).copy()
-
-        top_rejected_df = rejected_df.head(
-            max(0, 10 - len(top_acceptable_df))
-        ).copy()
-
-
-        # =========================================================
-        # 최종 표시 병원은 수용 가능/불가 여부와 관계없이
-        # "이송 경로 표시"와 동일한 카카오 단일 목적지 API로
-        # ETA / 거리를 한 번 더 확인한다.
-        # =========================================================
-        def refresh_final_route_values(
-            hospital_df,
-            ambulance_lat,
-            ambulance_lng
-        ):
-            if hospital_df.empty:
-                return hospital_df
-
-            hospital_df = hospital_df.copy()
-
-            for idx, row in hospital_df.iterrows():
-                try:
-                    hospital_lat, hospital_lng = get_hospital_lat_lng(row)
-
-                    if hospital_lat is None or hospital_lng is None:
-                        continue
-
-                    route_data = call_kakao_route(
-                        ambulance_lat,
-                        ambulance_lng,
-                        hospital_lat,
-                        hospital_lng
-                    )
-
-                    routes = route_data.get("routes") or []
-
-                    if not routes:
-                        continue
-
-                    route = next(
-                        (
-                            r for r in routes
-                            if r.get("result_code") == 0
-                        ),
-                        None
-                    )
-
-                    if not route:
-                        continue
-
-                    summary = route.get("summary") or {}
-
-                    distance_m = summary.get("distance")
-                    duration_s = summary.get("duration")
-
-                    if distance_m is None or duration_s is None:
-                        continue
-
-                    # "이송 경로 표시"와 동일한 카카오 결과값
-                    hospital_df.at[idx, "distance_km"] = round(
-                        float(distance_m) / 1000,
-                        2
-                    )
-
-                    hospital_df.at[idx, "eta_min"] = max(
-                    1,
-                        round(float(duration_s) / 60)
-                    )
-
-                    hospital_df.at[idx, "eta_is_routed"] = True
-
-                except Exception as route_error:
-                    print(
-                        f"최종 TOP10 카카오 경로 재조회 실패 "
-                        f"({get_hospital_name(row)}): {route_error}"
-                    )
-
-            return hospital_df
-        #-----------------------------------------------------------------------------
-
-
-        # =========================================================
-        # 수용 가능 TOP 10
-        # =========================================================
-        top_acceptable_df = refresh_final_route_values(
-            top_acceptable_df,
-            ambulance_lat,
-            ambulance_lng
-        )
-
-
-        # =========================================================
-        # 수용 불가 병원도 최종 화면에 표시된다면
-        # 반드시 동일하게 카카오 단일 목적지 API 재조회
-        # =========================================================
-        top_rejected_df = refresh_final_route_values(
-            top_rejected_df,
-            ambulance_lat,
-            ambulance_lng
-        )
-
-
-        # =========================================================
-        # 최종 표시 TOP 10
-        # =========================================================
-        top_result_df = (
-            pd.concat(
-                [
-                    top_acceptable_df,
-                    top_rejected_df
-                ],
-                ignore_index=True
+        # 추천 후보의 라우팅은 Kakao 다중 목적지 최대 1~2 batch로 제한한다.
+        # Kakao에서 특정 병원을 받지 못해도 그 병원을 제거하지 않고 추정값으로 유지한다.
+        model_candidate_df, kakao_confirmed_count, routing_batch_count = (
+            _prepare_routing_candidates_two_batches(
+                acceptable_all_df,
+                ambulance_lat,
+                ambulance_lng,
+                target_confirmed=KAKAO_TARGET_CONFIRMED_ROUTES,
             )
-            if not top_rejected_df.empty
-            else top_acceptable_df
         )
+
+        if model_candidate_df.empty and not acceptable_all_df.empty:
+            # Hard Filter는 통과했지만 병원 좌표가 전부 비어 있는 경우에도
+            # 의료적으로 수용 가능한 병원을 API 오류처럼 숨기지 않는다.
+            # 거리/ETA는 미확인 상태로 두고 기존 모델의 나머지 기준으로 순위를 계산한다.
+            model_candidate_df = acceptable_all_df.copy()
+            model_candidate_df["distance_km"] = np.nan
+            model_candidate_df["eta_min"] = np.nan
+            model_candidate_df["kakao_route_ok"] = False
+            model_candidate_df["routing_source"] = "coordinate_unavailable"
+
+        model_candidate_df = attach_model_feature_fields(model_candidate_df, patient=patient)
+
+        ranked_acceptable_df, applied_model_key = apply_ranking_model(
+            model_key,
+            model_candidate_df,
+            patient=patient,
+            topsis_variant=topsis_variant,
+        )
+
+        # A/B/C/D의 내부 로직은 그대로 두고, 시스템 공통 안전장치로
+        # 골든타임 내 도착 가능한 병원을 우선 배치한다.
+        ranked_acceptable_df, golden_time_safety_applied = apply_golden_time_safety_priority(
+            ranked_acceptable_df,
+            patient=patient,
+        )
+
+        # 추천 목록은 수용 가능 후보만 최대 10개 표시한다.
+        # 10개가 부족하더라도 명확한 불충족 병원을 숫자 채우기용으로 올리지 않는다.
+        top_acceptable_df = ranked_acceptable_df.head(10).copy()
+        top_result_df = top_acceptable_df.copy()
+
+        # 수용 불가 병원은 추천 10개에 섞지 않고 기존 '수용 불가' 탭에서 별도로 보여준다.
+        # 여기서는 외부 Kakao API를 추가 호출하지 않는다.
+        rejected_display_df = rejected_df.copy()
+
+        # 전체 Hard Filter 통과 집합에 ETA 컬럼을 만들어 성능지표의 분모는 전체 통과 수로 유지한다.
+        # ETA는 Kakao가 확보된 후보는 실제값, 미확보 후보는 명시적인 추정값을 사용한다.
+        acceptable_metrics_df = acceptable_all_df.copy()
+        acceptable_metrics_df["eta_min"] = np.nan
+        if not model_candidate_df.empty:
+            acceptable_metrics_df.loc[model_candidate_df.index, "eta_min"] = model_candidate_df["eta_min"]
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         performance_metrics = compute_performance_metrics(
             result_df=result_df,
-            acceptable_df=acceptable_df,
+            acceptable_df=acceptable_metrics_df,
             top_df=top_acceptable_df,
             patient=patient,
             elapsed_ms=elapsed_ms,
         )
 
-        return jsonify(
-            {
-                "success": True,
-                "source_file": excel_file,
-                "sheet_name": sheet_name,
-                "total_hospital_count": len(result_df),
-                "display_hospital_count": len(top_result_df),
-                "patient": patient,
-                "acceptable_count": len(acceptable_df),
-                "rejected_count": len(rejected_df),
-                "display_acceptable_count": len(top_acceptable_df),
-                "display_rejected_count": len(top_rejected_df),
-                "acceptable_hospitals": dataframe_to_records(top_acceptable_df),
-                "rejected_hospitals": dataframe_to_records(top_rejected_df),
-                "all_results": dataframe_to_records(top_result_df),
-                "applied_model": {**MODEL_INFO[applied_model_key], "key": applied_model_key},
-                "topsis_variant": (
-                    get_topsis_variant_metadata(topsis_variant, patient)
-                    if applied_model_key == "C"
-                    else None
-                ),
-                "patient_priority_profile": get_patient_priority_profile(patient),
-                "ambulance_location": {"lat": ambulance_lat, "lng": ambulance_lng},
-                "performance_metrics": performance_metrics,
-            }
-        )
-    except Exception as e:
-        print("RECOMMEND ERROR:", e)
-        return jsonify({"success": False, "error": _friendly_gemini_error_message(e)}), 500
+        with RUNTIME_DB_LOCK:
+            runtime_meta = dict(RUNTIME_HOSPITAL_META)
 
-
-# 신규 추가: 다중 환자 병상 배치 최적화 API
-@app.route("/api/optimize-batch", methods=["POST"])
-def optimize_batch_api():
-    start_time = time.perf_counter()
-    try:
-        body = request.get_json() or {}
-        patient_items = body.get("patients") or []
-        if not isinstance(patient_items, list) or not patient_items:
-            return jsonify({"success": False, "error": "patients 배열이 필요합니다."}), 400
-        if len(patient_items) > 30:
-            return jsonify({"success": False, "error": "한 번에 최대 30명까지 배정할 수 있습니다."}), 400
-
-        prepared = []
-        for index, item in enumerate(patient_items):
-            if item.get("patient"):
-                structured = PatientInfo(**item["patient"])
-                patient = structured.model_dump() if hasattr(structured, "model_dump") else structured.dict()
-            elif str(item.get("text") or "").strip():
-                patient = analyze_patient(item["text"])
-            else:
-                return jsonify({"success": False, "error": f"{index + 1}번째 환자에 text 또는 patient 정보가 필요합니다."}), 400
-
-            prepared.append({
-                "patient_id": str(item.get("patient_id") or f"patient-{index + 1}"),
-                "patient": patient,
-                "ambulance_lat": item.get("ambulance_lat"),
-                "ambulance_lng": item.get("ambulance_lng"),
-            })
-
-        hospital_df, excel_file, sheet_name = load_hospital_db()
-        result = optimize_batch_assignments(prepared, hospital_df)
-        result.update({
+        response_payload = {
             "success": True,
             "source_file": excel_file,
             "sheet_name": sheet_name,
-            "applied_model": {**MODEL_INFO["B"], "key": "B"},
-            "computation_time_ms": round((time.perf_counter() - start_time) * 1000, 1),
-        })
-        return jsonify(result)
+            "total_hospital_count": len(result_df),
+            "display_hospital_count": len(top_acceptable_df),
+            "patient": patient,
+            "patient_analysis_reused": patient_analysis_reused,
+            "acceptable_count": hard_filter_acceptable_count,
+            "rejected_count": len(rejected_df),
+            "model_candidate_count": len(model_candidate_df),
+            "kakao_confirmed_count": int(kakao_confirmed_count),
+            "estimated_route_count": int(
+                (model_candidate_df.get("routing_source", pd.Series(dtype=str)) == "estimated_fallback").sum()
+            ),
+            "routing_batch_count": int(routing_batch_count),
+            "golden_time_safety_applied": bool(golden_time_safety_applied),
+            "golden_time_min": to_number(patient.get("golden_time_min")),
+            "display_acceptable_count": len(top_acceptable_df),
+            "display_rejected_count": len(rejected_display_df),
+            "acceptable_hospitals": dataframe_to_records(top_acceptable_df),
+            "rejected_hospitals": dataframe_to_records(rejected_display_df),
+            "all_results": dataframe_to_records(top_result_df),
+            "applied_model": {**MODEL_INFO[applied_model_key], "key": applied_model_key},
+            "ambulance_location": {"lat": ambulance_lat, "lng": ambulance_lng},
+            "performance_metrics": performance_metrics,
+            "routing_source": "kakao_multi_with_estimated_fallback",
+            "db_updated_at": runtime_meta.get("db_updated_at"),
+            "db_synced_at": runtime_meta.get("synced_at"),
+        }
+        if applied_model_key == "C":
+            response_payload["topsis"] = get_topsis_variant_metadata(topsis_variant, patient)
+
+        return jsonify(response_payload)
 
     except Exception as e:
-        print("BATCH OPTIMIZE ERROR:", e)
+        print("RECOMMEND ERROR:", e)
+        status_code = _groq_status_code(e)
+        if status_code == 429:
+            return jsonify({
+                "success": False,
+                "error": "Groq 무료 API 요청 한도에 도달했습니다. 같은 환자 입력이 이미 분석된 경우에는 저장된 PatientInfo를 재사용해 A/B/C/D 비교를 계속할 수 있습니다.",
+            }), 429
+        if status_code is not None and status_code >= 500:
+            return jsonify({
+                "success": False,
+                "error": "Groq 모델 서버에서 일시적인 오류가 발생했습니다. 같은 환자 입력이 이미 분석된 경우에는 저장된 PatientInfo를 재사용해 A/B/C/D 비교를 계속할 수 있습니다.",
+            }), 503
         return jsonify({"success": False, "error": str(e)}), 500
+
 
 
 # =========================================================
@@ -5155,10 +5173,6 @@ def frontend_config_api():
             KAKAO_JAVASCRIPT_KEY
             or ""
         ),
-        "streamlit_db_manager_url": (
-            STREAMLIT_DB_MANAGER_URL
-            or ""
-        ),
     })
 
 
@@ -5197,5 +5211,8 @@ def index():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5050))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(
+        host="127.0.0.1",
+        port=5050,
+        debug=True
+    )
