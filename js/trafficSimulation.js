@@ -8,6 +8,7 @@
 // 3. 실제 도로 좌표를 따라 응급차량 시뮬레이션
 // 4. X1 ~ X10 시뮬레이션 배속 조절
 // 5. 60초마다 현재 위치에서 교통정보 재조회
+// 6. ETA는 현재 도로의 순간속도가 아니라 Kakao 경로 duration의 남은 비율로 계산
 //
 // 변경 사항
 // - 가상 신호등 기능 완전 삭제
@@ -1665,7 +1666,13 @@ popup.style.background =
             Number(
                 route.summary &&
                 route.summary.duration
-            ) || 0;
+            ) ||
+            roads.reduce(
+                (sum, road) =>
+                    sum + (Number(road.duration) || 0),
+                0
+            ) ||
+            0;
 
 
         // =================================================
@@ -2392,16 +2399,21 @@ if (
         // -------------------------------------------------
         // ETA
         // -------------------------------------------------
-
-        const remainingSeconds =
-            targetSpeed > 0
-                ? (
-                    remainingDistance /
-                    1000
-                ) /
-                targetSpeed *
-                3600
-                : 0;
+        // 예전에는 "남은 거리 ÷ 현재 도로의 순간 교통속도"로 ETA를 계산해,
+        // 도로가 바뀔 때 56km/h → 79km/h 같은 변화만으로 도착 예정 시각이
+        // 수십 분씩 튀는 문제가 있었다.
+        //
+        // 이제 Kakao 상세 경로가 반환한 전체 duration을 기준으로,
+        // 현재 경로 진행률만큼 남은 시간을 줄인다.
+        // 현재 도로의 traffic_speed는 속도계/교통상태 표시와 차량 움직임에만 사용한다.
+        const totalDistance = Number(state.model.totalDistance) || 0;
+        const totalDuration = Number(state.model.totalDuration) || 0;
+        const remainingRatio = totalDistance > 0
+            ? Math.max(0, Math.min(1, remainingDistance / totalDistance))
+            : 0;
+        const remainingSeconds = totalDuration > 0
+            ? totalDuration * remainingRatio
+            : 0;
 
 
         setText(
