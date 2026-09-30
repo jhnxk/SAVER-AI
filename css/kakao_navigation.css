@@ -110,7 +110,7 @@ body.navigation-mode .navigation-screen {
 
     right: 0;
 
-    height: 140px;
+    height: 155px;
 
     background: #1976d2;
 
@@ -120,7 +120,7 @@ body.navigation-mode .navigation-screen {
 
     align-items: center;
 
-    padding: 15px 30px;
+    padding: 20px 30px;
 
     z-index: 20;
 
@@ -181,6 +181,40 @@ body.navigation-mode .navigation-screen {
     overflow: hidden;
 
     text-overflow: ellipsis;
+}
+
+
+/* =========================================================
+   음성 버튼
+========================================================= */
+
+.navigation-mic {
+
+    width: 65px;
+
+    height: 65px;
+
+    min-width: 65px;
+
+    border: none;
+
+    border-radius: 50%;
+
+    background: white;
+
+    color: #1976d2;
+
+    font-size: 28px;
+
+    cursor: pointer;
+
+    box-shadow:
+        0 2px 6px rgba(
+            0,
+            0,
+            0,
+            0.2
+        );
 }
 
 
@@ -656,11 +690,9 @@ body.navigation-mode .navigation-screen {
 }
 
 
-.navigation-bottom-button.navigation-exit {
-    width: auto;
-    padding: 0 20px;
-    font-size: 18px;
-    font-weight: bold;
+.navigation-exit {
+
+    border-left: 1px solid #ddd;
 }
 
 
@@ -743,85 +775,125 @@ body.navigation-mode .navigation-screen {
 
     .navigation-top {
 
-        height: 80px;
+        height: 110px;
 
-        padding: 8px 14px;
+        padding: 12px 15px;
     }
 
 
     .navigation-direction-icon {
 
-        width: 46px;
+        width: 65px;
 
-        min-width: 46px;
+        min-width: 65px;
 
-        font-size: 38px;
+        font-size: 55px;
     }
 
 
     .navigation-distance {
 
-        font-size: 28px;
+        font-size: 38px;
 
-        margin-bottom: 3px;
+        margin-bottom: 5px;
     }
 
 
     .navigation-road-name {
 
-        font-size: 13px;
+        font-size: 18px;
+    }
+
+
+    .navigation-mic {
+
+        width: 50px;
+
+        height: 50px;
+
+        min-width: 50px;
+
+        font-size: 22px;
     }
 
 
     .navigation-speed {
 
-        top: 92px;
+        top: 130px;
 
-        left: 12px;
+        left: 15px;
 
-        width: 90px;
+        width: 130px;
 
-        height: 90px;
+        height: 130px;
 
-        border-width: 6px;
+        border-width: 8px;
     }
 
 
     .speed-title {
 
-        font-size: 11px;
+        font-size: 15px;
     }
 
 
     .speed-value {
 
-        font-size: 30px;
+        font-size: 42px;
     }
 
 
     .speed-unit {
 
-        font-size: 10px;
+        font-size: 12px;
     }
 
 
-    /* 모바일에서는 '카카오 실시간 교통' 패널 전체를 숨깁니다 */
     .traffic-simulation-panel {
-        display: none !important;
+
+        top: 275px;
+
+        right: 15px;
+
+        width: calc(100vw - 30px);
+
+        padding: 11px;
+
+        border-radius: 14px;
     }
 
-    /* 위 패널 전체를 숨겼으므로, 아래 하위 요소들의 CSS 수정은 삭제하거나 주석 처리해도 됩니다. */
-    /*
-    .traffic-panel-header { ... }
-    .traffic-panel-grid { display: none; }
-    .traffic-sign { ... }
-    .traffic-data-note { display: none; }
+
+    .traffic-panel-header {
+
+        margin-bottom: 8px;
+    }
 
 
-    /* 모바일에서는 시뮬레이션 배속 조절 UI를 표시하지 않는다 (trafficSimulation.js가 동적으로 생성) */
-    #simulation-speed-control {
+    .traffic-panel-header strong {
 
-        display: none !important;
+        font-size: 13px;
+    }
+
+
+    .traffic-panel-grid div {
+
+        padding: 7px;
+    }
+
+
+    .traffic-panel-grid strong {
+
+        font-size: 11px;
+    }
+
+
+    .traffic-sign {
+
+        margin-top: 8px;
+
+        padding: 8px 10px;
+
+        font-size: 11px;
     }
 
 
@@ -857,48 +929,37 @@ body.navigation-mode .navigation-screen {
 
     .navigation-bottom {
 
-        height: 54px;
+        height: 75px;
     }
 
 
     .navigation-bottom-button {
 
-        width: 50px;
+        width: 65px;
 
-        height: 54px;
+        height: 75px;
 
-        font-size: 20px;
-    }
-
-
-    /* "돌아가기" 글자는 아이콘 버튼과 달리 텍스트이므로 별도로 작게 표시한다 */
-    .navigation-bottom-button.navigation-exit {
-
-        width: auto;
-
-        padding: 0 14px;
-
-        font-size: 12px;
+        font-size: 28px;
     }
 
 
     .navigation-bottom-info {
 
-        gap: 18px;
+        gap: 30px;
     }
 
 
     .navigation-arrival span,
     .navigation-remaining span {
 
-        font-size: 10px;
+        font-size: 11px;
     }
 
 
     .navigation-arrival strong,
     .navigation-remaining strong {
 
-        font-size: 16px;
+        font-size: 21px;
     }
 
 }
