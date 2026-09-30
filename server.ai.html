@@ -309,7 +309,7 @@
                 <th class="p-2.5 text-center">응급실 병상</th>
                 <th class="p-2.5 text-center">ICU 가용병상</th>
                 <th class="p-2.5 text-center">수술실</th>
-                <th class="p-2.5 text-center">보유 장비</th>
+                <th class="p-2.5 text-center">필수 장비</th>
                 <th class="p-2.5">필수 진료과</th>
                 <th class="p-2.5 text-center">예상 이송시간</th>
                 <th class="p-2.5 text-center">예상 이송거리</th>
@@ -354,15 +354,6 @@
               <div class="flex justify-between p-2 bg-slate-950 rounded border border-slate-800"><span class="text-slate-400">필수 진료과 전문의 수:</span><span id="targetSpecialistCount" class="font-bold text-slate-200">-</span></div>
               <div class="flex justify-between p-2 bg-slate-950 rounded border border-slate-800"><span class="text-slate-400">예상 이동 시간:</span><span id="targetEta" class="font-bold text-slate-200">-</span></div>
               <div class="flex justify-between p-2 bg-slate-950 rounded border border-slate-800"><span class="text-slate-400">예상 이동 거리:</span><span id="targetDistance" class="font-bold text-slate-200">-</span></div>
-              <div class="flex items-center justify-between gap-2 p-2 bg-slate-950 rounded border border-slate-800">
-                <span class="text-slate-400 shrink-0">병원 전화번호:</span>
-                <div class="flex items-center justify-end gap-2 min-w-0">
-                  <span id="targetPhoneText" class="font-bold text-slate-200 truncate">정보 없음</span>
-                  <a id="targetPhoneCallBtn" href="#" class="md:hidden inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold px-3 py-1.5 rounded-full transition active:scale-95 pointer-events-none opacity-50 whitespace-nowrap">
-                    <i class="fa-solid fa-phone"></i><span>전화 걸기</span>
-                  </a>
-                </div>
-              </div>
             </div>
             <div class="mt-3 bg-slate-950 rounded border border-slate-800 p-3">
               <p class="text-[10px] text-slate-400 mb-1">판정 사유</p>
@@ -514,7 +505,6 @@
   </script>
   <script>
     let latestBackendResults = [];
-    let latestRejectedResults = [];
     let currentFilterMode = "all";
     let selectedModel = "A";
     let currentAppliedModelKey = "A";
@@ -804,35 +794,16 @@
         const etaMin = summary.duration != null ? Math.max(1, Math.round(Number(summary.duration) / 60)) : null;
         const distanceKm = summary.distance != null ? (Number(summary.distance) / 1000).toFixed(2) : null;
 
-        // 추천 계산 당시 이미 Kakao multi 값을 확보한 병원은
-        // 리스트와 상세 카드의 거리/ETA를 동일하게 유지한다.
-        // /api/route 단일 조회는 지도 경로/네비게이션 geometry 확보용으로만 사용한다.
-        // 반대로 추천 단계에서 fallback 추정값을 쓴 병원만 상세 조회값으로 정밀화한다.
-        const wasEstimated = isEstimatedRoute(hospital);
+        // 추천 순위는 이미 같은 시점의 카카오 다중 목적지 결과로 계산되어 있다.
+        // 상세 경로를 다시 조회해도 순위표의 snapshot 거리/ETA를 덮어쓰지 않는다.
         const loading = document.getElementById("routePreviewLoading");
         if (loading) {
-          loading.textContent = wasEstimated
-            ? `추천 목록의 추정값을 Kakao 상세 경로로 갱신 · ${distanceKm || "-"}km · ${etaMin || "-"}분`
-            : `Kakao 상세 경로를 지도에 표시했습니다 · 추천 목록 거리/ETA 유지`;
-          loading.className = "absolute top-3 left-3 bg-emerald-950/80 border border-emerald-700 rounded px-2 py-1 text-[11px] text-emerald-300 max-w-[92%]";
+          loading.textContent = `실제 도로 경로 ${distanceKm || "-"}km · 예상 ${etaMin || "-"}분`;
+          loading.className = "absolute top-3 left-3 bg-emerald-950/80 border border-emerald-700 rounded px-2 py-1 text-[11px] text-emerald-300";
         }
 
-        if (wasEstimated) {
-          document.getElementById("targetEta").textContent = etaMin !== null
-            ? `${etaMin}분 (카카오 상세 경로)`
-            : "정보 없음";
-          document.getElementById("targetDistance").textContent = distanceKm !== null
-            ? `${distanceKm}km (카카오 상세 경로)`
-            : "정보 없음";
-        }
-
-        const hospitalName = hospital.hospital_display_name || hospital.target_hospital || hospital.dutyname || hospital.dutyName || hospital.hpid || "선택 병원";
-        const routeBadge = document.getElementById("selectedHospitalRouteBadge");
-        if (routeBadge) {
-          routeBadge.textContent = wasEstimated
-            ? `${hospitalName} / Kakao 상세 경로로 갱신`
-            : `${hospitalName} / Kakao 경로 확인`;
-        }
+        document.getElementById("targetEta").textContent = (hospital.eta_min !== null && hospital.eta_min !== undefined) ? `${hospital.eta_min}분 (카카오 경로)` : "정보 없음";
+        document.getElementById("targetDistance").textContent = (hospital.distance_km !== null && hospital.distance_km !== undefined) ? `${hospital.distance_km}km (카카오 경로)` : "정보 없음";
       } catch (error) {
         console.error(error);
         const loading = document.getElementById("routePreviewLoading");
@@ -969,10 +940,7 @@
           return result;
         }
 
-        // 추천 순위에는 Hard Filter 통과 병원만 사용한다.
-        // 명확한 불충족 병원은 별도 '수용 불가' 탭에서만 보여 준다.
-        latestBackendResults = result.acceptable_hospitals || result.all_results || [];
-        latestRejectedResults = result.rejected_hospitals || [];
+        latestBackendResults = result.all_results || [];
         currentFilterMode = "all";
         latestPatient = result.patient || null;
         latestAnalyzedText = latestPatient ? normalizedText : null;
@@ -1026,9 +994,6 @@
         acceptable_count: result.acceptable_count,
         rejected_count: result.rejected_count,
         model_candidate_count: result.model_candidate_count,
-        kakao_confirmed_count: result.kakao_confirmed_count,
-        estimated_route_count: result.estimated_route_count,
-        routing_batch_count: result.routing_batch_count,
         patient_analysis_reused: Boolean(result.patient_analysis_reused),
         routing_source: result.routing_source,
         db_updated_at: result.db_updated_at
@@ -1126,58 +1091,10 @@
     }
 
     function getFilteredHospitals(hospitals) {
-      // 추천 순위/수용 가능: Hard Filter 통과 상위 후보만.
-      // 수용 불가: 백엔드가 별도로 반환한 명확한 불충족 병원 목록.
-      if (currentFilterMode === "fail") return latestRejectedResults || [];
-      return (hospitals || []).filter(h => Boolean(h.accept_possible));
-    }
-
-    function isEstimatedRoute(hospital) {
-      if (!hospital) return false;
-      return String(hospital.routing_source || "").startsWith("estimated_");
-    }
-
-    function formatEtaText(hospital) {
-      if (!hospital || hospital.eta_min === null || hospital.eta_min === undefined) return "정보없음";
-      return isEstimatedRoute(hospital) ? `약 ${hospital.eta_min}분` : `${hospital.eta_min}분`;
-    }
-
-    function formatDistanceText(hospital) {
-      if (!hospital || hospital.distance_km === null || hospital.distance_km === undefined) return "정보없음";
-      return isEstimatedRoute(hospital) ? `약 ${hospital.distance_km}km` : `${hospital.distance_km}km`;
-    }
-
-    function getHospitalPhone(hospital) {
-      if (!hospital) return "";
-      const raw = hospital.main_tel
-        || hospital.telno
-        || hospital.dutyTel1
-        || hospital.dutyTel
-        || hospital.phone
-        || hospital.telephone
-        || "";
-      const text = String(raw).trim();
-      if (!text || text.toLowerCase() === "nan" || text.toLowerCase() === "none") return "";
-      return text;
-    }
-
-    function updateHospitalPhoneInfo(hospital) {
-      const phone = getHospitalPhone(hospital);
-      const phoneText = document.getElementById("targetPhoneText");
-      const phoneBtn = document.getElementById("targetPhoneCallBtn");
-
-      if (phoneText) phoneText.textContent = phone || "정보 없음";
-      if (!phoneBtn) return;
-
-      if (phone) {
-        phoneBtn.href = `tel:${phone.replace(/[^0-9+]/g, "")}`;
-        phoneBtn.classList.remove("pointer-events-none", "opacity-50");
-        phoneBtn.setAttribute("aria-label", `${phone} 전화 걸기`);
-      } else {
-        phoneBtn.href = "#";
-        phoneBtn.classList.add("pointer-events-none", "opacity-50");
-        phoneBtn.setAttribute("aria-label", "전화번호 정보 없음");
-      }
+      // 기본 "추천 순위"는 Hard Filter 통과 병원만 보여 준다.
+      // 수용 불가 병원은 진단용 탭에서만 확인하며 추천 1~10위에는 섞지 않는다.
+      if (currentFilterMode === "fail") return hospitals.filter(h => !Boolean(h.accept_possible));
+      return hospitals.filter(h => Boolean(h.accept_possible));
     }
 
     function makeReasonDetails(reasonText, reasonClass) {
@@ -1207,7 +1124,7 @@
         tr.onclick = () => selectHospitalCardFromBackend(h);
 
         const isAvailable = Boolean(h.accept_possible);
-        const recommendationScoreText = isAvailable ? formatRecommendationScore(h) : "-";
+        const recommendationScoreText = formatRecommendationScore(h);
         const hospitalName = h.hospital_display_name || h.target_hospital || h.dutyname || h.dutyName || h.hpid || "병원명 미확인";
         const erBeds = safeValue(h.hvec, "-");
         const orRooms = safeValue(h.hvoc, "-");
@@ -1237,11 +1154,11 @@
           ? `<span class="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">${escapeHtml(h.acceptance_status || "수용 가능")}</span>`
           : `<span class="px-2 py-0.5 rounded text-xs bg-rose-500/20 text-rose-400 border border-rose-500/30">${escapeHtml(h.acceptance_status || "수용 불가")}</span>`;
 
-        const etaText = formatEtaText(h);
-        const distanceText = formatDistanceText(h);
+        const etaText = (h.eta_min !== null && h.eta_min !== undefined) ? `${h.eta_min}분` : "정보없음";
+        const distanceText = (h.distance_km !== null && h.distance_km !== undefined) ? `${h.distance_km}km` : "정보없음";
 
         tr.innerHTML = `
-          <td class="py-3 px-2 text-sm font-bold text-slate-200">${isAvailable ? `${idx + 1}.` : "제외 ·"} ${escapeHtml(hospitalName)}</td>
+          <td class="py-3 px-2 text-sm font-bold text-slate-200">${idx + 1}. ${escapeHtml(hospitalName)}</td>
           <td class="py-3 px-2 text-center text-sm text-emerald-400 font-bold" title="${escapeHtml(h.model_score_label || '추천 점수')}">${escapeHtml(recommendationScoreText)}</td>
           <td class="py-3 px-2 text-center text-sm font-semibold ${Number(erBeds) > 0 ? "text-emerald-400" : "text-rose-400"}">${escapeHtml(erBeds)}석</td>
           <td class="py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(icuText)}</td>
@@ -1275,27 +1192,14 @@
       const scoreLabel = document.getElementById("targetScoreLabel");
       if (scoreLabel) scoreLabel.textContent = "추천 점수:";
       const targetScore = document.getElementById("targetScore");
-      if (hospital.accept_possible) {
-        targetScore.textContent = formatRecommendationScore(hospital);
-        targetScore.title = hospital.model_score_label || "추천 점수";
-      } else {
-        targetScore.textContent = "-";
-        targetScore.title = "수용 불가 병원은 추천 점수를 표시하지 않습니다.";
-      }
-
+      targetScore.textContent = formatRecommendationScore(hospital);
+      targetScore.title = hospital.model_score_label || "추천 점수";
       document.getElementById("targetSpecialistCount").textContent = hospital.required_specialist_count_text || `${hospital.required_specialist_count_total || 0}명`;
-
-      const routeSuffix = isEstimatedRoute(hospital) ? "추정값" : "카카오 경로";
-      document.getElementById("targetEta").textContent = (hospital.eta_min !== null && hospital.eta_min !== undefined)
-        ? `${formatEtaText(hospital)} (${routeSuffix})`
-        : "정보 없음";
-      document.getElementById("targetDistance").textContent = (hospital.distance_km !== null && hospital.distance_km !== undefined)
-        ? `${formatDistanceText(hospital)} (${routeSuffix})`
-        : "정보 없음";
+      document.getElementById("targetEta").textContent = (hospital.eta_min !== null && hospital.eta_min !== undefined) ? `${hospital.eta_min}분 (카카오 경로)` : "정보 없음";
+      document.getElementById("targetDistance").textContent = (hospital.distance_km !== null && hospital.distance_km !== undefined) ? `${hospital.distance_km}km (카카오 경로)` : "정보 없음";
 
       const reasonText = hospital.failed_reasons_text || hospital.unknown_reasons_text || hospital.passed_reasons_text || "판정 사유가 없습니다.";
       document.getElementById("targetReason").textContent = reasonText;
-      updateHospitalPhoneInfo(hospital);
       latestSelectedRouteData = null;
 
       renderRoutePreview(hospital);
@@ -1303,7 +1207,6 @@
 
     function stopExecution() {
       latestBackendResults = [];
-      latestRejectedResults = [];
       currentFilterMode = "all";
       latestPatient = null;
       latestAnalyzedText = null;
@@ -1321,7 +1224,6 @@
       document.getElementById("targetEta").textContent = "-";
       document.getElementById("targetDistance").textContent = "-";
       document.getElementById("targetReason").textContent = "병원을 선택하면 판정 사유가 표시됩니다.";
-      updateHospitalPhoneInfo(null);
       document.getElementById("selectedHospitalRouteBadge").textContent = "선택 병원 없음";
       const routeBox = document.getElementById("routeDisplayContainer");
       if (routeBox) {
