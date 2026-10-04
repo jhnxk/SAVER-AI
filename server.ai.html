@@ -186,7 +186,8 @@
         <i class="fa-solid fa-clock-rotate-left mr-1.5 text-cyan-300"></i>
         <span>DB 갱신: <span id="dbUpdatedAt" class="font-medium text-cyan-200">확인 중</span></span>
       </div>
-      <a href="http://localhost:8501" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg font-medium transition">
+      <a id="dbManagerLink" href="#" target="_blank" rel="noopener"
+          class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg font-medium transition">
         <i class="fa-solid fa-database mr-1"></i>병원 DB 관리
       </a>
     </div>
@@ -663,6 +664,18 @@
         el.textContent = result.db_updated_at || result.synced_at || "미확인";
       } catch (error) {
         el.textContent = "미확인";
+      }
+    }
+
+    async function applyDbManagerLink() {
+      const link = document.getElementById("dbManagerLink");
+      if (!link) return;
+      try {
+        const res = await fetch("/api/config", { cache: "no-store" });
+        const cfg = await res.json();
+        if (cfg.db_manager_url) link.href = cfg.db_manager_url;
+      } catch (e) {
+        console.warn("DB 관리 주소를 불러오지 못했습니다.", e);
       }
     }
 
@@ -1624,6 +1637,7 @@
       updateModelSelectionUI();
       initAmbulanceLocation();
       loadRuntimeDbStatus();
+      applyDbManagerLink();
       resetPerformanceMetrics();
       const closeNavigation = document.getElementById("btnCloseNavigation");
       if (closeNavigation) closeNavigation.addEventListener("click", () => returnToSaverFromNavigation());
