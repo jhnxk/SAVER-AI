@@ -35,7 +35,7 @@ SAVER_DB_FILE = "saver_current_hospital_db.xlsx"
 NATIONAL_UPDATE_SCRIPT = "update_realtime_resources_national.py"
 DEPARTMENT_UPDATE_SCRIPT = "update_departments_hira_api.py"
 
-RECOMMENDATION_SYSTEM_URL = "http://127.0.0.1:5050"
+RECOMMENDATION_SYSTEM_URL = os.getenv("SAVER_URL", "http://127.0.0.1:5050").rstrip("/")
 SAVER_SYNC_URL = f"{RECOMMENDATION_SYSTEM_URL}/api/sync-hospitals"
 
 # 화면/저장 파일에서 숨길 컬럼
@@ -238,16 +238,23 @@ def sync_current_db_to_saver(df=None):
         )
     )
 
-    response = requests.post(
-        SAVER_SYNC_URL,
-        json={
-            "hospitals": hospitals,
-            "source": "streamlit_runtime",
-            "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "db_updated_at": st.session_state.last_fetch,
-        },
-        timeout=30,
-    )
+    payload = {
+        "hospitals": hospitals,
+        "source": "streamlit_runtime",
+        "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "db_updated_at": st.session_state.last_fetch,
+    }
+
+    # Render 무료 플랜에서 SAVER가 잠들어 있으면 첫 요청이 실패할 수 있어 1회 재시도
+    response = None
+    for attempt in range(2):
+        try:
+            response = requests.post(SAVER_SYNC_URL, json=payload, timeout=90)
+            break
+        except requests.exceptions.RequestException as e:
+            if attempt == 1:
+                raise RuntimeError(f"SAVER 서버에 연결하지 못했습니다: {e}")
+            time.sleep(5)
 
     try:
         result = response.json()
