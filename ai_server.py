@@ -221,6 +221,9 @@ KAKAO_REST_API_KEY = os.getenv("KAKAO_REST_API_KEY")
 KAKAO_JAVASCRIPT_KEY = os.getenv("KAKAO_JAVASCRIPT_KEY")
 KAKAO_REQUEST_TIMEOUT_SEC = 15
 
+# DB_MANAGER 연결 링크
+DB_MANAGER_URL = os.getenv("DB_MANAGER_URL", "http://localhost:8501").rstrip("/")
+
 # 환자 위치 랜덤 생성 범위. 지도팀 코드의 전국 시연용 반경과 같은 의미다.
 PATIENT_MIN_RADIUS_KM = 0.8
 PATIENT_MAX_RADIUS_KM = 5.0
@@ -5173,6 +5176,7 @@ def frontend_config_api():
             KAKAO_JAVASCRIPT_KEY
             or ""
         ),
+        "db_manager_url": DB_MANAGER_URL,
     })
 
 
