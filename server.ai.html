@@ -157,11 +157,21 @@
       .nav-speed-circle .speed-value { font-size: 20px; }
       .nav-bottom-bar { padding: 12px 16px; min-height: 64px; }
     }
+    /* [모바일 전용] 화면 폭 767px 이하에서만 적용. PC(768px 이상) 화면에는 영향 없음. */
+    @media (max-width: 767px) {
+      /* 상단 헤더: 우측 버튼 영역이 좁은 화면에서 다음 줄로 내려가도록 */
+      .saver-header { flex-wrap: wrap; row-gap: 8px; }
+      .saver-header-actions { flex-wrap: wrap; row-gap: 6px; }
+      /* 대시보드 순서: 좌·우 섹션을 풀어 카드 단위로 정렬 */
+      .saver-mobile-flatten { display: contents !important; }
+      .saver-mobile-order-model { order: 1; }
+      .saver-mobile-order-perf { order: 2; }
+    }
   </style>
   <link rel="stylesheet" href="/css/kakao_navigation.css">
 </head>
 <body class="h-full flex flex-col font-sans antialiased text-slate-100 bg-slate-950 overflow-x-hidden">
-  <header class="bg-slate-900 border-b border-slate-800 px-4 lg:px-8 py-3 sticky top-0 z-50 flex items-center justify-between shadow-lg">
+  <header class="saver-header bg-slate-900 border-b border-slate-800 px-4 lg:px-8 py-3 sticky top-0 z-50 flex items-center justify-between shadow-lg">
     <div class="flex items-center space-x-3">
       <div class="bg-red-600 text-white p-2.5 rounded-xl shadow-lg shadow-red-600/30 flex items-center justify-center pulse-red">
         <i class="fa-solid fa-truck-medical text-xl"></i>
@@ -174,27 +184,26 @@
         <p class="text-xs text-slate-400">자연어 기반 응급환자 상태 분석 및 병원 수용 가능 여부 판별 시스템</p>
       </div>
     </div>
-    <div class="flex items-center space-x-3 text-xs">
-      <div class="hidden sm:flex items-center space-x-2 bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-lg">
+    <div class="saver-header-actions flex items-center space-x-3 text-xs">
+      <div class="hidden md:flex items-center space-x-2 bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-lg">
         <span class="relative flex h-2.5 w-2.5">
           <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
           <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
         </span>
         <span class="text-slate-300 font-medium">Flask AI 서버 5050</span>
       </div>
-      <div class="hidden md:flex items-center bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-lg text-slate-300">
+      <div class="flex items-center bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-lg text-slate-300">
         <i class="fa-solid fa-clock-rotate-left mr-1.5 text-cyan-300"></i>
         <span>DB 갱신: <span id="dbUpdatedAt" class="font-medium text-cyan-200">확인 중</span></span>
       </div>
-      <a id="dbManagerLink" href="#" target="_blank" rel="noopener"
-          class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg font-medium transition">
+      <a href="http://localhost:8501" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg font-medium transition">
         <i class="fa-solid fa-database mr-1"></i>병원 DB 관리
       </a>
     </div>
   </header>
 
   <main class="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4 lg:p-6 max-w-[1920px] mx-auto w-full">
-    <section class="lg:col-span-4 flex flex-col gap-4">
+    <section class="saver-mobile-flatten lg:col-span-4 flex flex-col gap-4">
       <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
         <div class="flex items-center justify-between mb-3">
           <h2 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
@@ -256,7 +265,7 @@
 }</pre>
       </div>
 
-      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+      <div class="saver-mobile-order-model bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-xs font-semibold text-slate-200 flex items-center gap-2"><i class="fa-solid fa-diagram-project text-indigo-400"></i><span>알고리즘 모델 선택</span></h3>
           <span id="ambulanceGpsBadge" class="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700">GPS 확인 중...</span>
@@ -283,7 +292,7 @@
       </div>
     </section>
 
-    <section class="lg:col-span-8 flex flex-col gap-4">
+    <section class="saver-mobile-flatten lg:col-span-8 flex flex-col gap-4">
       <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
           <div>
@@ -306,15 +315,15 @@
             <thead class="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
               <tr>
                 <th class="p-2.5">순위 / 병원명</th>
-                <th id="modelScoreHeader" class="p-2.5 text-center">추천 점수</th>
-                <th class="p-2.5 text-center">응급실 병상</th>
-                <th class="p-2.5 text-center">ICU 가용병상</th>
-                <th class="p-2.5 text-center">수술실</th>
-                <th class="p-2.5 text-center">보유 장비</th>
-                <th class="p-2.5">필수 진료과</th>
-                <th class="p-2.5 text-center">예상 이송시간</th>
-                <th class="p-2.5 text-center">예상 이송거리</th>
-                <th class="p-2.5 text-center">최종 판정</th>
+                <th id="modelScoreHeader" class="hidden md:table-cell p-2.5 text-center">추천 점수</th>
+                <th class="hidden md:table-cell p-2.5 text-center">응급실 병상</th>
+                <th class="hidden md:table-cell p-2.5 text-center">ICU 가용병상</th>
+                <th class="hidden md:table-cell p-2.5 text-center">수술실</th>
+                <th class="hidden md:table-cell p-2.5 text-center">보유 장비</th>
+                <th class="hidden md:table-cell p-2.5">필수 진료과</th>
+                <th class="hidden md:table-cell p-2.5 text-center">예상 이송시간</th>
+                <th class="hidden md:table-cell p-2.5 text-center">예상 이송거리</th>
+                <th class="hidden md:table-cell p-2.5 text-center">최종 판정</th>
                 <th class="p-2.5">주요 사유</th>
               </tr>
             </thead>
@@ -385,7 +394,7 @@
         </p>
       </div>
 
-      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+      <div class="saver-mobile-order-perf bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-xs font-semibold text-slate-200 flex items-center gap-2"><i class="fa-solid fa-gauge-high text-amber-400"></i><span>모델 성능 검증</span></h3>
           <span id="perfModelBadge" class="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700">분석 전</span>
@@ -664,18 +673,6 @@
         el.textContent = result.db_updated_at || result.synced_at || "미확인";
       } catch (error) {
         el.textContent = "미확인";
-      }
-    }
-
-    async function applyDbManagerLink() {
-      const link = document.getElementById("dbManagerLink");
-      if (!link) return;
-      try {
-        const res = await fetch("/api/config", { cache: "no-store" });
-        const cfg = await res.json();
-        if (cfg.db_manager_url) link.href = cfg.db_manager_url;
-      } catch (e) {
-        console.warn("DB 관리 주소를 불러오지 못했습니다.", e);
       }
     }
 
@@ -1253,17 +1250,29 @@
         const etaText = formatEtaText(h);
         const distanceText = formatDistanceText(h);
 
+        // [모바일 전용] 767px 이하에서는 '순위 / 병원명' 칸 아래에 나머지 정보를 모아 표시한다. (md 이상 PC에서는 숨김)
+        const mobileDetailHtml = `
+          <div class="md:hidden mt-2 space-y-1 text-[11px] font-normal leading-relaxed">
+            <div class="flex flex-wrap items-center gap-1">${statusBadge}</div>
+            <div><span class="text-slate-500">추천 점수</span> <span class="text-emerald-400 font-bold">${escapeHtml(recommendationScoreText)}</span></div>
+            <div><span class="text-slate-500">응급실 병상</span> <span class="font-semibold ${Number(erBeds) > 0 ? "text-emerald-400" : "text-rose-400"}">${escapeHtml(erBeds)}석</span> · <span class="text-slate-500">ICU</span> <span class="text-slate-300">${escapeHtml(icuText)}</span> · <span class="text-slate-500">수술실</span> <span class="text-slate-300">${escapeHtml(orRooms)}실</span></div>
+            <div><span class="text-slate-500">보유 장비</span> <span class="text-slate-400">${escapeHtml(availableEquipList.join(", ") || "-")}</span></div>
+            <div><span class="text-slate-500">필수 진료과</span> <span class="${specialistClass}">${escapeHtml(specialistText)}</span> <span class="text-slate-500">${escapeHtml(h.required_specialist_count_text || "")}</span></div>
+            <div><span class="text-slate-500">예상 이송</span> <span class="text-blue-300 font-semibold">${escapeHtml(etaText)}</span> · <span class="text-slate-300">${escapeHtml(distanceText)}</span></div>
+          </div>
+        `;
+
         tr.innerHTML = `
-          <td class="py-3 px-2 text-sm font-bold text-slate-200">${isAvailable ? `${idx + 1}.` : "제외 ·"} ${escapeHtml(hospitalName)}</td>
-          <td class="py-3 px-2 text-center text-sm text-emerald-400 font-bold" title="${escapeHtml(h.model_score_label || '추천 점수')}">${escapeHtml(recommendationScoreText)}</td>
-          <td class="py-3 px-2 text-center text-sm font-semibold ${Number(erBeds) > 0 ? "text-emerald-400" : "text-rose-400"}">${escapeHtml(erBeds)}석</td>
-          <td class="py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(icuText)}</td>
-          <td class="py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(orRooms)}실</td>
-          <td class="py-3 px-2 text-center text-xs text-slate-400 max-w-[160px] whitespace-normal">${escapeHtml(availableEquipList.join(", ") || "-")}</td>
-          <td class="py-3 px-2 text-[11px] ${specialistClass} max-w-[180px] whitespace-normal">${escapeHtml(specialistText)}<br><span class="text-slate-500">${escapeHtml(h.required_specialist_count_text || "")}</span></td>
-          <td class="py-3 px-2 text-center text-xs text-blue-300 font-semibold">${escapeHtml(etaText)}</td>
-          <td class="py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(distanceText)}</td>
-          <td class="py-3 px-2 text-center">${statusBadge}</td>
+          <td class="py-3 px-2 text-sm font-bold text-slate-200">${isAvailable ? `${idx + 1}.` : "제외 ·"} ${escapeHtml(hospitalName)}${mobileDetailHtml}</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-sm text-emerald-400 font-bold" title="${escapeHtml(h.model_score_label || '추천 점수')}">${escapeHtml(recommendationScoreText)}</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-sm font-semibold ${Number(erBeds) > 0 ? "text-emerald-400" : "text-rose-400"}">${escapeHtml(erBeds)}석</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(icuText)}</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(orRooms)}실</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-400 max-w-[160px] whitespace-normal">${escapeHtml(availableEquipList.join(", ") || "-")}</td>
+          <td class="hidden md:table-cell py-3 px-2 text-[11px] ${specialistClass} max-w-[180px] whitespace-normal">${escapeHtml(specialistText)}<br><span class="text-slate-500">${escapeHtml(h.required_specialist_count_text || "")}</span></td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-blue-300 font-semibold">${escapeHtml(etaText)}</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(distanceText)}</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center">${statusBadge}</td>
           <td class="py-3 px-2 text-[11px] max-w-[420px]">${makeReasonDetails(reasonText, reasonClass)}</td>
         `;
 
@@ -1637,7 +1646,6 @@
       updateModelSelectionUI();
       initAmbulanceLocation();
       loadRuntimeDbStatus();
-      applyDbManagerLink();
       resetPerformanceMetrics();
       const closeNavigation = document.getElementById("btnCloseNavigation");
       if (closeNavigation) closeNavigation.addEventListener("click", () => returnToSaverFromNavigation());
