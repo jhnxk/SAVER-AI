@@ -219,10 +219,9 @@ DEFAULT_AMBULANCE_LNG = 127.3845
 # .env에 KAKAO_REST_API_KEY가 있어야 실제 도로 경로/실시간 교통 ETA를 조회할 수 있다.
 KAKAO_REST_API_KEY = os.getenv("KAKAO_REST_API_KEY")
 KAKAO_JAVASCRIPT_KEY = os.getenv("KAKAO_JAVASCRIPT_KEY")
+# 병원 DB 관리 웹(Streamlit) 주소. Render에서는 환경변수로 실제 배포 주소를 지정한다.
+DB_MANAGER_URL = str(os.getenv("DB_MANAGER_URL") or "http://localhost:8501").strip().rstrip("/")
 KAKAO_REQUEST_TIMEOUT_SEC = 15
-
-# DB_MANAGER 연결 링크
-DB_MANAGER_URL = os.getenv("DB_MANAGER_URL", "http://localhost:8501").rstrip("/")
 
 # 환자 위치 랜덤 생성 범위. 지도팀 코드의 전국 시연용 반경과 같은 의미다.
 PATIENT_MIN_RADIUS_KM = 0.8
