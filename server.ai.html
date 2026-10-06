@@ -166,6 +166,13 @@
       .saver-mobile-flatten { display: contents !important; }
       .saver-mobile-order-model { order: 1; }
       .saver-mobile-order-perf { order: 2; }
+      /* 내비게이션 시뮬레이션: '카카오 실시간 교통' 패널·마이크 버튼 숨김, 신호·속도 원 축소 */
+      #navigation-screen .traffic-simulation-panel { display: none !important; }
+      #navigation-screen .navigation-mic { display: none !important; }
+      #navigation-screen .navigation-speed { width: 84px; height: 84px; min-width: 84px; border-width: 5px; top: 146px; left: 12px; }
+      #navigation-screen .navigation-speed .speed-title { font-size: 10px; margin-bottom: 1px; }
+      #navigation-screen .navigation-speed .speed-value { font-size: 26px; }
+      #navigation-screen .navigation-speed .speed-unit { font-size: 9px; margin-top: 1px; }
     }
   </style>
   <link rel="stylesheet" href="/css/kakao_navigation.css">
@@ -196,7 +203,7 @@
         <i class="fa-solid fa-clock-rotate-left mr-1.5 text-cyan-300"></i>
         <span>DB 갱신: <span id="dbUpdatedAt" class="font-medium text-cyan-200">확인 중</span></span>
       </div>
-      <a href="http://localhost:8501" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg font-medium transition">
+      <a id="dbManagerLink" href="http://localhost:8501" target="_blank" rel="noopener" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg font-medium transition">
         <i class="fa-solid fa-database mr-1"></i>병원 DB 관리
       </a>
     </div>
@@ -1641,11 +1648,25 @@
       }
     }
 
+    // 병원 DB 관리 버튼 주소를 서버 환경변수(DB_MANAGER_URL)에서 받아 적용한다.
+    async function applyDbManagerLink() {
+      const link = document.getElementById("dbManagerLink");
+      if (!link) return;
+      try {
+        const res = await fetch("/api/config", { cache: "no-store" });
+        const cfg = await res.json();
+        if (cfg.db_manager_url) link.href = cfg.db_manager_url;
+      } catch (e) {
+        console.warn("DB 관리 주소를 불러오지 못했습니다.", e);
+      }
+    }
+
     window.addEventListener("DOMContentLoaded", () => {
       updateFilterButtons();
       updateModelSelectionUI();
       initAmbulanceLocation();
       loadRuntimeDbStatus();
+      applyDbManagerLink();
       resetPerformanceMetrics();
       const closeNavigation = document.getElementById("btnCloseNavigation");
       if (closeNavigation) closeNavigation.addEventListener("click", () => returnToSaverFromNavigation());
