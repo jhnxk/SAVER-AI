@@ -223,7 +223,7 @@ def sync_current_db_to_saver(df=None):
         df = st.session_state.hospital_df
 
     if df is None or len(df) == 0:
-        raise RuntimeError("SAVER로 전달할 병원 데이터가 없습니다.")
+        raise RuntimeError("IEUM-AI로 전달할 병원 데이터가 없습니다.")
 
     df_to_send = df.copy()
     df_to_send = remove_hidden_columns(df_to_send)
@@ -253,22 +253,22 @@ def sync_current_db_to_saver(df=None):
             break
         except requests.exceptions.RequestException as e:
             if attempt == 1:
-                raise RuntimeError(f"SAVER 서버에 연결하지 못했습니다: {e}")
+                raise RuntimeError(f"IEUM-AI 서버에 연결하지 못했습니다: {e}")
             time.sleep(5)
 
     try:
         result = response.json()
     except Exception:
         raise RuntimeError(
-            f"SAVER 동기화 응답을 읽지 못했습니다. HTTP {response.status_code}"
+            f"IEUM-AI 동기화 응답을 읽지 못했습니다. HTTP {response.status_code}"
         )
 
     if response.status_code >= 400 or not result.get("success"):
-        raise RuntimeError(result.get("error") or "SAVER 동기화에 실패했습니다.")
+        raise RuntimeError(result.get("error") or "IEUM-AI 동기화에 실패했습니다.")
 
     st.session_state.saver_synced = True
     st.session_state.saver_sync_count = int(result.get("hospital_count", len(df_to_send)))
-    add_log(f"SAVER 메모리 동기화 완료: {st.session_state.saver_sync_count}개 병원")
+    add_log(f"IEUM-AI 메모리 동기화 완료: {st.session_state.saver_sync_count}개 병원")
 
     return result
 
@@ -369,11 +369,11 @@ def refresh_realtime_data(trigger="수동"):
 
         try:
             sync_current_db_to_saver(df)
-            add_log("엑셀 저장 없이 현재 DB를 SAVER에 바로 전달했습니다.")
+            add_log("엑셀 저장 없이 현재 DB를 IEUM-AI에 바로 전달했습니다.")
         except Exception as sync_error:
             st.session_state.saver_synced = False
             st.session_state.saver_sync_count = 0
-            add_log(f"SAVER 자동 동기화 실패: {sync_error}")
+            add_log(f"IEUM-AI 자동 동기화 실패: {sync_error}")
 
         return True
 
@@ -431,11 +431,11 @@ def refresh_department_data():
 
         try:
             sync_current_db_to_saver(df)
-            add_log("엑셀 저장 없이 HIRA 갱신 DB를 SAVER에 바로 전달했습니다.")
+            add_log("엑셀 저장 없이 HIRA 갱신 DB를 IEUM-AI에 바로 전달했습니다.")
         except Exception as sync_error:
             st.session_state.saver_synced = False
             st.session_state.saver_sync_count = 0
-            add_log(f"SAVER 자동 동기화 실패: {sync_error}")
+            add_log(f"IEUM-AI 자동 동기화 실패: {sync_error}")
 
     except Exception as e:
         st.session_state.fetch_error = str(e)
@@ -453,7 +453,7 @@ def load_current_file_to_session(db_file):
         st.session_state.saver_synced = False
         st.session_state.saver_sync_count = 0
         add_log(f"파일 로드 완료: {db_file} / 시트 {sheet_name} / {len(df)}개 병원")
-        add_log("SAVER 반영을 위해 [SAVER 동기화]를 눌러주세요.")
+        add_log("IEUM-AI 반영을 위해 [IEUM-AI 동기화]를 눌러주세요.")
 
     except Exception as e:
         st.session_state.fetch_error = str(e)
@@ -467,12 +467,12 @@ def save_current_db_for_app_and_saver():
     현재 Streamlit 메모리 DB를 SAVER 런타임 메모리로 직접 전달한다.
     """
     if st.session_state.hospital_df is None:
-        st.warning("SAVER로 전달할 데이터가 없습니다.")
-        add_log("SAVER 동기화 실패: 데이터 없음")
+        st.warning("IEUM-AI로 전달할 데이터가 없습니다.")
+        add_log("IEUM-AI 동기화 실패: 데이터 없음")
         return
 
     sync_current_db_to_saver(st.session_state.hospital_df)
-    st.toast("현재 DB를 SAVER에 바로 전달했습니다.", icon="✅")
+    st.toast("현재 DB를 IEUM-AI에 바로 전달했습니다.", icon="✅")
 
 def build_summary(df):
     total_count = len(df)
@@ -553,22 +553,22 @@ def ensure_initial_realtime_refresh():
     st.session_state.initial_realtime_refresh_success = bool(success)
 
     if success:
-        add_log("앱 최초 자동 갱신 완료: 최신 실시간 DB가 SAVER에 전달되었습니다.")
+        add_log("앱 최초 자동 갱신 완료: 최신 실시간 DB가 IEUM-AI에 전달되었습니다.")
         return
 
     # 실시간 API가 실패해도 현재 로드된 baseline으로 SAVER 사용은 가능하게 한다.
     add_log(
         "앱 최초 실시간 갱신에 실패하여 현재 로드된 HIRA baseline을 "
-        "SAVER fallback DB로 동기화합니다."
+        "IEUM-AI fallback DB로 동기화합니다."
     )
 
     try:
         sync_current_db_to_saver(st.session_state.hospital_df)
-        add_log("HIRA baseline fallback SAVER 동기화 완료")
+        add_log("HIRA baseline fallback IEUM-AI 동기화 완료")
     except Exception as sync_error:
         st.session_state.saver_synced = False
         st.session_state.saver_sync_count = 0
-        add_log(f"HIRA baseline fallback SAVER 동기화 실패: {sync_error}")
+        add_log(f"HIRA baseline fallback IEUM-AI 동기화 실패: {sync_error}")
 
 
 def handle_periodic_realtime_refresh(auto_refresh_tick):
@@ -631,7 +631,7 @@ with st.sidebar:
     if st.session_state.auto_refresh_enabled:
         st.caption(
             f"최초 1회 자동 갱신 후 {st.session_state.auto_refresh_interval_minutes}분마다 "
-            "NEMC 실시간 정보만 다시 갱신하고 SAVER에 자동 동기화합니다."
+            "NEMC 실시간 정보만 다시 갱신하고 IEUM-AI에 자동 동기화합니다."
         )
     else:
         st.caption("주기 자동 갱신은 꺼져 있습니다. 최초 1회 자동 갱신은 수행됩니다.")
@@ -724,7 +724,7 @@ with col2:
         refresh_department_data()
 
 with col3:
-    if st.button("SAVER 동기화", use_container_width=True):
+    if st.button("IEUM-AI 동기화", use_container_width=True):
         try:
             save_current_db_for_app_and_saver()
         except Exception as e:
@@ -732,17 +732,17 @@ with col3:
             st.session_state.run_status = "오류 발생"
             st.session_state.saver_synced = False
             st.session_state.saver_sync_count = 0
-            add_log(f"SAVER 동기화 오류: {e}")
+            add_log(f"IEUM-AI 동기화 오류: {e}")
 
     st.link_button(
-        "🚑 SAVER 실행",
+        "🚑 IEUM-AI 실행",
         url=RECOMMENDATION_SYSTEM_URL,
         type="primary",
         use_container_width=True,
     )
 
     if st.session_state.saver_synced:
-        st.caption(f"SAVER 동기화 완료: {st.session_state.saver_sync_count}개 병원")
+        st.caption(f"IEUM-AI 동기화 완료: {st.session_state.saver_sync_count}개 병원")
 
 with col4:
     if st.button("수행 멈춤", use_container_width=True):
@@ -999,7 +999,7 @@ st.info(
 
 st.warning(
     "진료과와 전문의 수는 실시간 수용 가능 여부가 아니라 병원의 기본 역량 정보입니다. "
-    "SAVER 추천 단계에서는 필수 진료과 여부를 조건에 포함하되, 최종 이송 전에는 병원 사전 수용 확인이 필요합니다."
+    "IEUM-AI 추천 단계에서는 필수 진료과 여부를 조건에 포함하되, 최종 이송 전에는 병원 사전 수용 확인이 필요합니다."
 )
 
 
@@ -1026,32 +1026,32 @@ with st.expander("업데이트 스크립트 로그 보기"):
 
 st.divider()
 
-st.subheader("SAVER 추천 시스템 연결")
+st.subheader("IEUM-AI 추천 시스템 연결")
 
 if st.session_state.saver_synced:
     st.success(
-        f"현재 DB {st.session_state.saver_sync_count}개 병원이 SAVER 메모리에 동기화되었습니다."
+        f"현재 DB {st.session_state.saver_sync_count}개 병원이 IEUM-AI 메모리에 동기화되었습니다."
     )
 
     st.link_button(
-        "🚑 SAVER 실행",
+        "🚑 IEUM-AI 실행",
         url=RECOMMENDATION_SYSTEM_URL,
         type="primary",
         use_container_width=True,
     )
 
     st.caption(
-        "이 버튼으로 이동하면 SAVER-AI는 Excel 저장본보다 현재 동기화된 메모리 DB를 우선 사용합니다."
+        "이 버튼으로 이동하면 IEUM-AI는 Excel 저장본보다 현재 동기화된 메모리 DB를 우선 사용합니다."
     )
 
 else:
     st.warning(
-        "현재 DB가 SAVER에 아직 동기화되지 않았습니다. "
-        "[SAVER 동기화]를 누르면 Excel 파일을 덮어쓰지 않고 바로 전달됩니다."
+        "현재 DB가 IEUM-AI에 아직 동기화되지 않았습니다. "
+        "[IEUM-AI 동기화]를 누르면 Excel 파일을 덮어쓰지 않고 바로 전달됩니다."
     )
 
     st.link_button(
-        "🚑 SAVER 화면만 열기",
+        "🚑 IEUM-AI 화면만 열기",
         url=RECOMMENDATION_SYSTEM_URL,
         use_container_width=True,
     )
