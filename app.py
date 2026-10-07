@@ -38,6 +38,10 @@ DEPARTMENT_UPDATE_SCRIPT = "update_departments_hira_api.py"
 RECOMMENDATION_SYSTEM_URL = os.getenv("SAVER_URL", "http://127.0.0.1:5050").rstrip("/")
 SAVER_SYNC_URL = f"{RECOMMENDATION_SYSTEM_URL}/api/sync-hospitals"
 
+# 앱 최초 접속 시 NEMC 실시간 자동 갱신 여부.
+# 기본값은 켜짐(로컬 동작 유지). Render에서는 AUTO_REFRESH_ON_START=0 으로 끈다.
+AUTO_REFRESH_ON_START = str(os.getenv("AUTO_REFRESH_ON_START", "1")).strip().lower() not in ("0", "false", "no", "off")
+
 # 화면/저장 파일에서 숨길 컬럼
 # 원본 API 매칭 검증용 컬럼이지만, 시연 화면에서는 수용 점수와 혼동될 수 있어서 제외
 HIDDEN_COLUMNS = [
@@ -547,6 +551,14 @@ def ensure_initial_realtime_refresh():
 
     # 실패 시 Streamlit rerun마다 무한 재시도하지 않도록 호출 전에 먼저 표시한다.
     st.session_state.initial_realtime_refresh_attempted = True
+
+    if not AUTO_REFRESH_ON_START:
+        add_log(
+            "최초 자동 갱신 꺼짐(AUTO_REFRESH_ON_START=0): 저장된 DB로 화면을 표시합니다. "
+            "실시간 갱신은 [실시간 API 새로고침] 버튼으로 실행하세요."
+        )
+        return
+
     add_log("앱 최초 진입: NEMC 실시간 API 자동 갱신을 시작합니다.")
 
     success = refresh_realtime_data(trigger="앱 최초 자동 갱신")
@@ -630,11 +642,13 @@ with st.sidebar:
 
     if st.session_state.auto_refresh_enabled:
         st.caption(
-            f"최초 1회 자동 갱신 후 {st.session_state.auto_refresh_interval_minutes}분마다 "
-            "NEMC 실시간 정보만 다시 갱신하고 IEUM-AI에 자동 동기화합니다."
+            ...
         )
     else:
-        st.caption("주기 자동 갱신은 꺼져 있습니다. 최초 1회 자동 갱신은 수행됩니다.")
+        if AUTO_REFRESH_ON_START:
+            st.caption("주기 자동 갱신은 꺼져 있습니다. 최초 1회 자동 갱신은 수행됩니다.")
+        else:
+            st.caption("주기 자동 갱신과 최초 자동 갱신이 모두 꺼져 있습니다. 갱신은 버튼으로 실행하세요.")
 
     st.divider()
 
