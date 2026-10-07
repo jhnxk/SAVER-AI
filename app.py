@@ -17,8 +17,9 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 
 st.set_page_config(
-    page_title="전국 응급의료 병원 DB 실시간 업데이트",
-    layout="wide",
+    page_title="DB_MANAGER.IEUM-AI | 응급환자 병원 DB관리 시스템",
+    page_icon="🏥",
+    layout="wide"
 )
 
 st.title("응급의료 병원 DB 실시간 업데이트 프로토타입")
