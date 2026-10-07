@@ -6,8 +6,8 @@
 
 | 서비스 | 주소 | 역할 |
 | --- | --- | --- |
-| IEUM-AI 웹 (Flask) | https://saver-ai-project.onrender.com | 환자 분석 · 병원 추천 · 경로 안내 |
-| 병원 DB 관리 웹 (Streamlit) | https://saver-ai-db-manager.onrender.com | 병원 DB 조회 · 실시간 갱신 · IEUM-AI 동기화 |
+| IEUM-AI 웹 (Flask) | https://ieum-ai-project.onrender.com | 환자 분석 · 병원 추천 · 경로 안내 |
+| 병원 DB 관리 웹 (Streamlit) | https://db-manager-ieum-ai.onrender.com | 병원 DB 조회 · 실시간 갱신 · IEUM-AI 동기화 |
 
 > Render 무료 플랜을 사용하므로 한동안 접속이 없으면 서버가 절전 상태가 되어, 첫 접속에 1분 정도 걸릴 수 있습니다.
 
