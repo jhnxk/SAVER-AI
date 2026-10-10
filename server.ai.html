@@ -174,7 +174,8 @@
       #navigation-screen .navigation-speed .speed-value { font-size: 26px; }
       #navigation-screen .navigation-speed .speed-unit { font-size: 9px; margin-top: 1px; }
     }
-            /* [웹(PC) 전용] 화면 폭 768px 이상: 내비게이션 시뮬레이션 화면 조정 */
+
+        /* [웹(PC) 전용] 화면 폭 768px 이상: 내비게이션 시뮬레이션 화면 조정 */
     @media (min-width: 768px) {
       /* 마이크 버튼 숨김 */
       #navigation-screen .navigation-mic { display: none !important; }
@@ -201,6 +202,7 @@
       #navigation-screen #simulation-speed-title { font-size: 16px; margin-bottom: 10px; }
       #navigation-screen .simulation-speed-button { min-width: 54px; height: 42px; font-size: 16px; }
     }
+
   </style>
   <link rel="stylesheet" href="/css/kakao_navigation.css">
 </head>
@@ -382,8 +384,8 @@
           <div id="routeDisplayContainer" class="relative w-full h-[260px] bg-slate-950 rounded-lg overflow-hidden border border-slate-800 flex items-center justify-center">
             <div class="text-center text-slate-500 text-xs px-6">
               <i class="fa-solid fa-route text-2xl mb-2 block"></i>
-              GPS + 카카오내비게이션 연동 예정 영역입니다.<br />
-              '병원 사전 수용 신청 및 이송 시작' 버튼을 누르면 이 자리에 실제 이동 경로가 표시될 예정입니다.
+              GPS + 카카오내비게이션 연동 영역입니다.<br />
+              환자 상태 입력 후, 'AI 분석 병원 필터링' 버튼을 누르면 이 자리에 실제 이동 경로가 표시됩니다.
             </div>
           </div>
         </div>
