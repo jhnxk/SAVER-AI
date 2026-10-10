@@ -673,7 +673,7 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button("현재 파일 다시 불러오기", use_container_width=True):
+    if st.button("현재 파일 다시 불러오기", width="stretch"):
         load_current_file_to_session(db_file)
 
 
@@ -731,15 +731,15 @@ handle_periodic_realtime_refresh(auto_refresh_tick)
 col1, col2, col3, col4, col5 = st.columns([1.2, 1.2, 1.2, 1, 2.4])
 
 with col1:
-    if st.button("실시간 API 새로고침", type="primary", use_container_width=True):
+    if st.button("실시간 API 새로고침", type="primary", width="stretch"):
         refresh_realtime_data(trigger="수동 버튼")
 
 with col2:
-    if st.button("HIRA 상세정보 갱신", use_container_width=True):
+    if st.button("HIRA 상세정보 갱신", width="stretch"):
         refresh_department_data()
 
 with col3:
-    if st.button("IEUM-AI 동기화", use_container_width=True):
+    if st.button("IEUM-AI 동기화", width="stretch"):
         try:
             save_current_db_for_app_and_saver()
         except Exception as e:
@@ -753,14 +753,14 @@ with col3:
         "🚑 IEUM-AI 실행",
         url=RECOMMENDATION_SYSTEM_URL,
         type="primary",
-        use_container_width=True,
+        width="stretch",
     )
 
     if st.session_state.saver_synced:
         st.caption(f"IEUM-AI 동기화 완료: {st.session_state.saver_sync_count}개 병원")
 
 with col4:
-    if st.button("수행 멈춤", use_container_width=True):
+    if st.button("수행 멈춤", width="stretch"):
         reset_execution_state()
 
 with col5:
@@ -991,7 +991,7 @@ if not display_cols:
 
 st.dataframe(
     filtered_df[display_cols],
-    use_container_width=True,
+    width="stretch",
     height=520,
 )
 
@@ -1052,7 +1052,7 @@ if st.session_state.saver_synced:
         "🚑 IEUM-AI 실행",
         url=RECOMMENDATION_SYSTEM_URL,
         type="primary",
-        use_container_width=True,
+        width="stretch",
     )
 
     st.caption(
@@ -1068,7 +1068,7 @@ else:
     st.link_button(
         "🚑 IEUM-AI 화면만 열기",
         url=RECOMMENDATION_SYSTEM_URL,
-        use_container_width=True,
+        width="stretch",
     )
 
 
