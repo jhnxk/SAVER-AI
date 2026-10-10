@@ -474,7 +474,7 @@ def load_current_file_to_session(db_file):
         st.session_state.saver_synced = False
         st.session_state.saver_sync_count = 0
         add_log(f"파일 로드 완료: {db_file} / 시트 {sheet_name} / {len(df)}개 병원")
-        add_log("IEUM-AI 반영을 위해 [IEUM-AI 동기화]를 눌러주세요.")
+        add_log("IEUM-AI 반영은 [실시간 API 새로고침] 후 자동으로 이루어집니다.")
 
     except Exception as e:
         st.session_state.fetch_error = str(e)
@@ -762,16 +762,6 @@ with col2:
         refresh_department_data()
 
 with col3:
-    if st.button("IEUM-AI 동기화", width="stretch"):
-        try:
-            save_current_db_for_app_and_saver()
-        except Exception as e:
-            st.session_state.fetch_error = str(e)
-            st.session_state.run_status = "오류 발생"
-            st.session_state.saver_synced = False
-            st.session_state.saver_sync_count = 0
-            add_log(f"IEUM-AI 동기화 오류: {e}")
-
     st.link_button(
         "🚑 IEUM-AI 실행",
         url=RECOMMENDATION_SYSTEM_URL,
@@ -1066,33 +1056,20 @@ st.divider()
 
 st.subheader("IEUM-AI 추천 시스템 연결")
 
-if st.session_state.saver_synced:
-    st.success(
-        f"현재 DB {st.session_state.saver_sync_count}개 병원이 IEUM-AI 메모리에 동기화되었습니다."
-    )
+st.info(
+    "최신 업데이트된 DB가 IEUM-AI에 동기화되어 있습니다."
+    "갱신된 병원 DB를 IEUM-AI 서버 메모리에 보관해 병원 추천에 바로 사용합니다."
+)
 
-    st.link_button(
-        "🚑 IEUM-AI 실행",
-        url=RECOMMENDATION_SYSTEM_URL,
-        type="primary",
-        width="stretch",
-    )
+st.link_button(
+    "🚑 IEUM-AI 실행",
+    url=RECOMMENDATION_SYSTEM_URL,
+    width="stretch",
+)
 
-    st.caption(
-        "이 버튼으로 이동하면 IEUM-AI는 Excel 저장본보다 현재 동기화된 메모리 DB를 우선 사용합니다."
-    )
-
-else:
-    st.warning(
-        "현재 DB가 IEUM-AI에 아직 동기화되지 않았습니다. "
-        "[IEUM-AI 동기화]를 누르면 Excel 파일을 덮어쓰지 않고 바로 전달됩니다."
-    )
-
-    st.link_button(
-        "🚑 IEUM-AI 화면만 열기",
-        url=RECOMMENDATION_SYSTEM_URL,
-        width="stretch",
-    )
+st.caption(
+    "이 버튼으로 이동하면 IEUM-AI는 Excel 저장본보다 현재 동기화된 메모리 DB를 우선 사용합니다."
+)
 
 
 # =========================================================
