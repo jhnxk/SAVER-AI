@@ -92,6 +92,20 @@ def add_log(message):
     st.session_state.run_log.append(f"[{now}] {message}")
     st.session_state.run_log = st.session_state.run_log[-40:]
 
+# 서버 전체(모든 브라우저 접속)가 공유하는 최신 갱신 결과.
+# st.session_state는 접속마다 따로라서 창을 닫으면 사라지므로,
+# 갱신 결과를 여기에 함께 저장해 새로 접속해도 마지막 갱신 상태를 보여준다.
+# (서버가 재시작·절전되면 비워진다.)
+@st.cache_resource
+def get_shared_db_state():
+    return {"hospital_df": None, "last_fetch": None}
+
+
+def save_shared_db_state(df, last_fetch):
+    shared = get_shared_db_state()
+    shared["hospital_df"] = df.copy()
+    shared["last_fetch"] = last_fetch
+
 
 def choose_sheet_name(excel_file):
     xls = pd.ExcelFile(excel_file)
@@ -363,6 +377,7 @@ def refresh_realtime_data(trigger="수동"):
         st.session_state.hospital_df = df
         st.session_state.last_fetch = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         st.session_state.last_realtime_refresh_epoch = time.time()
+        save_shared_db_state(df, st.session_state.last_fetch)
         st.session_state.run_status = "실시간 갱신 완료"
         st.session_state.excel_saved = False
 
@@ -429,6 +444,7 @@ def refresh_department_data():
 
         st.session_state.hospital_df = df
         st.session_state.last_fetch = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_shared_db_state(df, st.session_state.last_fetch)
         st.session_state.run_status = "HIRA 상세정보 갱신 완료"
         st.session_state.excel_saved = False
 
@@ -694,7 +710,14 @@ else:
 # =========================================================
 
 if st.session_state.hospital_df is None:
-    if Path(db_file).exists():
+    shared_state = get_shared_db_state()
+
+    if shared_state["hospital_df"] is not None:
+        # 다른 접속에서 갱신한 최신 결과가 서버에 있으면 파일 대신 그것을 사용한다.
+        st.session_state.hospital_df = shared_state["hospital_df"].copy()
+        st.session_state.last_fetch = shared_state["last_fetch"]
+        add_log(f"서버에 저장된 최근 갱신 결과를 불러왔습니다 (갱신 시각 {shared_state['last_fetch']}).")
+    elif Path(db_file).exists():
         load_current_file_to_session(db_file)
     elif Path(DEFAULT_FILE).exists():
         load_current_file_to_session(DEFAULT_FILE)
