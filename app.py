@@ -755,7 +755,8 @@ col1, col2, col3, col4, col5 = st.columns([1.2, 1.2, 1.2, 1, 2.4])
 
 with col1:
     if st.button("실시간 API 새로고침", type="primary", width="stretch"):
-        refresh_realtime_data(trigger="수동 버튼")
+        with st.spinner("전국 병원 데이터를 불러오고 있어 시간이 다소 걸릴 수 있습니다."):
+            refresh_realtime_data(trigger="수동 버튼")
 
 with col2:
     if st.button("HIRA 상세정보 갱신", width="stretch"):
