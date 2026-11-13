@@ -1,181 +1,98 @@
-# IEUM-AI · 응급환자 이송 병원 추천 시스템
+# IEUM GitHub와 Render 배포 가이드
 
-> 구급대원이 말로 환자 상태를 입력하면, AI가 필요한 의료자원을 분석하고 전국 병원의 실시간 수용 정보와 실제 도로 이송시간을 함께 고려해 최적의 병원을 추천합니다.
+새 GitHub 저장소와 본인 Render 계정으로 전시용 링크를 만드는 방법입니다. 수정된 소스는 IEUM_Render_Deploy.zip에 들어 있습니다.
 
-'응급실 뺑뺑이'처럼 병원 선정이 늦어져 골든타임을 놓치는 문제를 줄이기 위한 **AI 기반 응급의료 매칭 시스템 프로토타입**입니다.
+## 1. GitHub에 올리기
 
-| 서비스 | 주소 | 역할 |
+1. ZIP을 풀고 IEUM_Render_Deploy 폴더를 엽니다. 폴더 바로 아래에 Dockerfile, render.yaml, ai_server.py가 보여야 합니다.
+2. GitHub에서 **New repository**를 선택합니다. 예시 이름은 **ieum-expo**입니다. **Private**으로 만들고 README, .gitignore, 라이선스 초기화 옵션은 비워 둡니다. 저장소가 Private이어도 Render가 만든 시연 주소는 브라우저에서 열 수 있습니다.
+3. Mac 터미널에서 ZIP을 푼 폴더로 이동한 뒤 아래 명령을 실행합니다. YOUR_GITHUB_ID는 본인 아이디로 바꿉니다.
+
+```bash
+cd ~/Downloads/IEUM_Render_Deploy
+git init -b main
+git add .
+git diff --cached --name-only
+git commit -m "Prepare IEUM exhibition deployment"
+git remote add origin https://github.com/YOUR_GITHUB_ID/ieum-expo.git
+git push -u origin main
+```
+
+커밋 전 파일 목록에 실제 .env, Google 인증 JSON, dispatch_log.jsonl이 없어야 합니다. .env.example은 빈 값을 담은 예제입니다. 이번 ZIP에서 기존 전송 로그를 제외했습니다.
+
+## 2. API 키 준비
+
+| Render 변수 | 본인 계정에서 준비할 것 | 쓰는 곳 |
 | --- | --- | --- |
-| IEUM-AI 웹 (Flask) | https://ieum-ai-project.onrender.com | 환자 분석 · 병원 추천 · 경로 안내 |
-| 병원 DB 관리 웹 (Streamlit) | https://db-manager-ieum-ai.onrender.com | 병원 DB 조회 · 실시간 갱신 · IEUM-AI 동기화 |
+| `SERVICE_KEY` | 공공데이터포털 **국립중앙의료원 전국 응급의료기관 정보 조회 서비스** 활용 신청 후 승인된 일반 인증키. 디코딩 키를 권장하며 인코딩 키도 처리합니다. | 가용병상과 장비의 주기 조회 |
+| `GROQ_API_KEY` | Groq Console에서 발급 | 환자 발화 구조화 |
+| `KAKAO_REST_API_KEY` | 카카오디벨로퍼스 앱의 REST API 키. 카카오모빌리티 길찾기 사용 설정과 쿼터 확인 | 도로 ETA와 상세 경로 |
+| `KAKAO_JAVASCRIPT_KEY` | 카카오디벨로퍼스 앱의 JavaScript 키. 카카오맵 사용 설정 후 Render의 HTTPS 주소를 **JavaScript SDK 도메인**에 등록 | 브라우저 지도 |
+| `GOOGLE_CLOUD_PROJECT` | 음성 시연을 켤 경우, Speech-to-Text API와 결제가 설정된 본인 Google Cloud 프로젝트 ID | 음성 전사 |
+| `GOOGLE_APPLICATION_CREDENTIALS` | 음성 시연을 켤 경우, Render **Environment → Secret Files**에 google-stt.json을 만들고 Speech-to-Text 호출 권한이 있는 서비스 계정 JSON을 저장. 변수 값에는 `/etc/secrets/google-stt.json` 입력 | 서버 음성 인증 |
 
-> Render 무료 플랜을 사용하므로 한동안 접속이 없으면 서버가 절전 상태가 되어, 첫 접속에 1분 정도 걸릴 수 있습니다.
+처음에는 공공데이터·Groq·카카오 키를 연결해 **텍스트 프리셋부터** 확인합니다. 음성까지 시연할 때 Google 설정을 추가하고 재배포합니다. HTTPS 접속 후 브라우저 마이크를 허용합니다. Google 스트리밍 기본 설정은 us와 chirp_3입니다. HIRA 자료는 함께 제공된 기준 파일을 읽으므로 전시 서비스 시작에 HIRA 키가 필요하지 않습니다.
 
----
+## 3. Render에 올리기
 
-## 주요 기능
+1. [Render Dashboard](https://dashboard.render.com/)에서 **New → Blueprint**를 선택합니다.
+2. 본인 GitHub를 연결하고 방금 만든 저장소의 접근을 허용합니다. 브랜치는 main, Blueprint 파일은 루트의 render.yaml입니다.
+3. 2단계의 필수 키 네 개를 입력하고 비용과 설정을 확인한 다음 배포합니다. 파일은 **유료 Starter 웹 인스턴스 한 개**를 선택합니다. 서비스 이름 ieum-expo는 필요하면 본인 이름을 붙여 수정할 수 있습니다.
+4. 서비스 상태가 **Live**가 되면 서비스 상단의 HTTPS 링크를 복사합니다. 그 주소를 카카오의 JavaScript SDK 도메인에 등록한 뒤 Render 링크를 다시 엽니다.
+5. 소스를 수정한 뒤 같은 GitHub 브랜치에 push하면 Render의 자동 배포 설정에 따라 새 버전이 반영됩니다.
 
-**IEUM-AI 웹**
-- 🎙 **실시간 음성 입력**: Google Cloud Speech-to-Text 스트리밍 인식과 의료 자연어 후처리를 거칩니다(예: "혈압 백삼십에 팔십" → "혈압 130/80", "산소포화도 95퍼센트" → "SpO2 95%").
-- 🧠 **AI 환자 상태 분석**: Groq LLM(`openai/gpt-oss-120b`)이 환자 설명을 구조화된 요구조건으로 변환합니다. 결과에는 KTAS, 골든타임, 필수 진료과·장비, ICU·수술실 필요 여부가 담깁니다.
-- 🏥 **병원 수용 가능 여부 판별(Hard Filter)**: 필수 조건을 명확히 충족하지 못하는 병원은 제외합니다. 정보가 없어 판단할 수 없는 병원은 '확인 필요' 후보로 남깁니다.
-- 🧮 **추천 알고리즘 4종**: Model A(최근접), B(MILP), C(TOPSIS), D(가중치 종합점수)를 제공하며, 모델을 바꾸면 즉시 다시 계산합니다.
-- 🗺 **카카오 도로 경로 기반 ETA**와 골든타임 우선 배치를 적용합니다.
-- 📍 **환자 위치**: 기기 GPS를 사용하거나, 시연용으로 전국 병원 주변 0.8~5km 지점에 랜덤으로 생성합니다.
-- 📞 병원 전화 연결, 사전 수용 신청 기록, **내비게이션 시뮬레이션**(실제 도로 좌표와 교통 상태를 반영하며 X1~X10 배속)을 지원합니다.
-- 📊 **모델 성능 검증 패널**: 수용성공률, 골든타임 준수율, 평균·P95 ETA, 혼잡도, 계산시간을 보여줍니다.
-- 📱 **반응형 웹**으로 PC와 스마트폰 브라우저에서 모두 사용할 수 있습니다.
+수동으로 만들려면 **New → Web Service**, 본인 저장소, **Docker**, **Starter**, 인스턴스 한 개를 선택합니다. **Health Check Path**는 /healthz입니다. Start Command는 Dockerfile이 제공하고 포트는 Render의 PORT를 읽습니다. render.yaml의 환경변수도 Render에 추가합니다.
 
-**병원 DB 관리 웹**
-- 전국 상급종합·종합병원 **384곳** DB를 시·도, API 매칭 상태, 진료과 유무, 병원명으로 조회합니다.
-- NEMC 실시간 응급자원(병상·장비)과 HIRA 상세정보(진료과·전문의·특수진료·장비)를 갱신합니다.
-- 갱신한 DB를 IEUM-AI 메모리로 즉시 동기화하고, 수행 로그를 보여줍니다.
+무료로 화면만 먼저 볼 때는 수동 **Web Service → Free**에서 IEUM_LIVE_REFRESH=0으로 설정할 수 있습니다. 화면에 **과거 샘플 · 시연 전용**으로 표시됩니다. Render Free는 인바운드 트래픽이 15분 없으면 잠들고 다음 접속에 시작 시간이 생깁니다. 백그라운드 스레드만 돌아가는 동안은 인바운드 트래픽이 생기지 않습니다. 전시 때 연속 자동 갱신이 필요하면 Starter 구성을 사용합니다.
 
----
+## 4. 배포 직후 확인하기
 
-## 시스템 구성
+1. **/healthz**를 열어 HTTP 200과 `{"ok":true}`를 확인합니다. 이것은 웹 서버 준비 상태입니다.
+2. **/api/runtime-db-status**를 열어 status, fresh_count, last_error를 봅니다. 정상 갱신은 **fresh**와 **0보다 큰 fresh_count**로 확인합니다. db_updated_at은 IEUM 조회 성공 시각이고 provider_latest_at은 유효한 기관 원본 시각 중 가장 최근 값입니다.
+3. 메인에서 **뇌졸중** 프리셋을 선택하고 **AI 분석 · 병원 필터링**을 누릅니다. 환자 요구조건과 후보, 데이터 상태, 예상 이송시간 표시를 확인합니다. 모델 A → B → C → D를 바꾸면 같은 구조화 결과를 재사용합니다. 갱신된 DB는 다음 추천 요청부터 사용합니다.
+4. 카카오 ETA가 붙은 행과 **약**으로 표시된 행을 구분합니다. 카카오 경로가 확인된 건수만 시간 기준 검증에 들어갑니다. 0/K는 확인 경로가 없다는 뜻입니다. 상세 지도는 선택 후 별도 시점에 조회하며 추천 시점의 표와 검증 수치는 함께 유지됩니다.
+5. 전시 전 PC와 휴대폰에서 각각 확인합니다. 첫 추천, 같은 문장의 재추천, 모델 변경, 지도 경로, 음성을 켰다면 마이크까지 테스트합니다. DevTools Network의 /api/recommend-hospitals 응답에 있는 performance_metrics.stage_ms로 환자 분석·필터·경로·순위를 나누어 봅니다. 음성 시작부터 화면까지의 시간은 별도로 재고, 20회 이상 반복한 뒤 중앙값·P95와 실패 건수를 함께 기록합니다.
 
-```mermaid
-flowchart LR
-    U[구급대원<br/>PC·스마트폰] -->|음성·텍스트 입력| S
-    P[공공데이터 API<br/>HIRA · NEMC] --> D
-    subgraph Render
-        D[병원 DB 관리 웹<br/>Streamlit] -->|/api/sync-hospitals| S[IEUM-AI 웹<br/>Flask]
-    end
-    S --> G[Groq LLM<br/>환자 상태 구조화]
-    S --> T[Google Cloud STT<br/>실시간 음성 인식]
-    S --> K[카카오모빌리티·카카오맵<br/>경로·ETA·지도]
-```
-
-### 추천 흐름
-1. **환자 입력**: 텍스트 또는 음성(STT → 의료 용어 후처리)
-2. **위치 결정**: GPS / 랜덤 생성 / 기본 위치(대전광역시청)
-3. **환자 구조화**: Groq → `PatientInfo`(같은 문장은 캐시 재사용)
-4. **Hard Filter**: 필수 조건을 병원 DB와 비교
-5. **경로 계산**: 카카오 다중 목적지 API(최대 30개 × 2회). 경로를 받지 못한 병원은 직선거리 기반 근사값을 씁니다.
-6. **순위 계산**: 선택한 모델(A~D)로 순위를 매기고, 골든타임 안에 도착 가능한 병원을 앞에 둡니다. 상위 10개를 표시합니다.
-7. **병원 선택**: 카카오 단일 경로로 미리보기
-8. **이송 시작**: `dispatch_log.jsonl`에 기록하고 내비게이션 시뮬레이션을 시작합니다.
-
----
-
-## 폴더 구조
-
-```
-├── ai_server.py                      # IEUM-AI Flask 백엔드 (환자 분석·추천·STT·경로 API)
-├── server.ai.html                    # IEUM-AI 프론트엔드 (단일 페이지)
-├── js/
-│   ├── voiceInput.js                 # 마이크 → WebSocket → Google STT 실시간 음성 입력
-│   ├── medicalTextNormalizer.js      # 의료 자연어 보수적 후처리
-│   └── trafficSimulation.js          # 카카오 경로 기반 내비게이션 시뮬레이션
-├── css/
-│   └── kakao_navigation.css          # 내비게이션 화면 스타일
-├── app.py                            # 병원 DB 관리 웹 (Streamlit)
-├── api_client.py                     # NEMC 응급의료기관 API 클라이언트
-├── build_national_master_db.py       # ① HIRA 병원 목록 → 마스터 DB 생성
-├── update_realtime_resources_national.py  # ② NEMC 실시간 자원 매칭
-├── update_departments_hira_api.py    # ③ HIRA 진료과·전문의·특수진료·장비 보완
-├── national_hospital_master.xlsx                     # ① 결과
-├── national_hospital_db_realtime_updated.xlsx        # ② 결과
-├── national_hospital_db_departments_hira_updated.xlsx  # ③ 결과 (최종 DB)
-├── saver_current_hospital_db.xlsx    # IEUM-AI 기본 DB(fallback)
-├── dispatch_log.jsonl                # 병원 사전 수용 신청 기록
-├── requirements.txt
-└── runtime.txt
-```
-
-IEUM-AI는 병원 DB를 다음 순서로 찾아 사용합니다: **DB 관리 웹에서 동기화한 메모리 DB → `saver_current_hospital_db.xlsx` → HIRA 갱신본 → 실시간 갱신본 → 마스터 DB**
-
----
-
-## 기술 스택
-
-| 구분 | 기술 |
+| 상태 또는 현상 | 확인할 것 |
 | --- | --- |
-| 백엔드 | Python 3, Flask, Flask-CORS, Flask-Sock |
-| DB 관리 웹 | Streamlit, streamlit-autorefresh |
-| 데이터 처리 | pandas, NumPy, openpyxl |
-| 최적화·검증 | PuLP 3.3.2 (MILP), Pydantic |
-| 프론트엔드 | HTML, JavaScript, Tailwind CSS, Web Audio API |
-| AI·음성 | Groq API (`openai/gpt-oss-120b`), Google Cloud Speech-to-Text V2 (`chirp_3`) |
-| 지도·경로 | 카카오맵 JavaScript SDK, 카카오모빌리티 길찾기 API |
-| 공공데이터 | HIRA 병원정보서비스, HIRA 의료기관별상세정보서비스, NEMC 응급의료기관 정보 조회 서비스 |
-| 배포 | GitHub, Render |
+| nemc_missing_service_key, nemc_result_* | 공공데이터 승인 서비스명, 키와 쿼터를 확인합니다. last_error에 반환 코드가 남습니다. |
+| nemc_incomplete_pagination, nemc_inconsistent_total_count | 전국 조회의 XML totalCount와 페이지 응답을 확인합니다. 개발 환경에서도 Render와 같은 키로 점검합니다. |
+| low_coverage_*_of_338 | 지역 조건을 생략한 전국 조회가 전체 범위를 반환하는지 확인합니다. 원본에 기관 ID가 신설·변경됐으면 주소 및 기관 정보를 대조한 뒤 교차표를 갱신합니다. 기준을 낮추기 전에 누락 원인을 확인합니다. |
+| no_fresh_provider_observations, stale | 원본 hvidate가 현재 한국시각 기준 15분 이내인지 확인합니다. 서버가 방금 조회한 시각과 기관 원본 시각은 별개입니다. |
+| degraded | 마지막 성공 자료 중 유효시간 이내인 행은 계속 쓰고 있습니다. 최근 실패가 이어지면 Render Logs와 API 응답을 확인합니다. |
+| 지도는 뜨는데 ETA에 **약**이 붙음 | REST 키와 길찾기 쿼터, 후보 거리, 카카오 응답을 확인합니다. 다중 목적지 API 공식 반경 상한은 10km입니다. |
+| 지도 자체가 로드되지 않음 | JavaScript 키와 HTTPS 도메인, 카카오맵 사용 설정을 확인합니다. |
+| 음성이 비활성화됨 | Render Secret File과 GOOGLE_APPLICATION_CREDENTIALS를 확인합니다. 텍스트 프리셋은 계속 사용할 수 있습니다. |
 
----
+기본 180초 주기는 한 페이지로 응답하면 약 **480회/일**입니다. 페이지가 늘면 호출 수도 늘어납니다. 서비스 승인 한도와 원본 갱신 주기를 먼저 확인한 뒤 조정합니다. 개별 기관의 15분 유효시간은 전시용 정책입니다. 진료과 자료는 기준 파일의 관측 시점에 해당하므로 별도로 갱신합니다.
 
-## 실행 방법
+## 5. 수정 파일과 이유
 
-### 1. 설치
-```bash
-git clone https://github.com/jhnxk/SAVER-AI.git
-cd SAVER-AI
-pip install -r requirements.txt
-```
+| 파일 | 반영한 수정 |
+| --- | --- |
+| `api_client.py` | 전국 가용병상 API를 지역 분할 없이 조회하고, 반환 코드와 모든 페이지를 검사합니다. 키 인코딩을 한 번만 적용하고 실패 메시지에서 인증 URL을 제외합니다. |
+| `realtime_store.py` | 서버 시작 시 기준 파일을 한 번 읽습니다. 백그라운드에서 180초마다 갱신하고 검사를 통과한 스냅샷을 한 번에 교체합니다. 일부 응답 또는 장애 시 마지막 정상 스냅샷을 유지하며 기관별 원본 시각이 만료되면 해당 자원을 미확인 처리합니다. |
+| `data/nemc_hpid_crosswalk.csv`, `build_hpid_crosswalk.py` | 첨부 DB 384곳 중 **정규화 병원명·시도가 일치하고 HPID 연결이 유일한 338곳**을 사용합니다. 기존 자료에서 삼성창원병원과 근로복지공단 창원병원에 같은 HPID가 배정된 사례가 있었습니다. 46곳의 실시간 자원은 미연결로 남겨 두었으며 주소·공식 기관 ID 대조가 필요합니다. |
+| `ai_server.py` | 추천 요청은 메모리 스냅샷을 사용합니다. 최신 병상 관측이 없으면 추천 대기 응답을 반환합니다. 일부 조건 미확인 후보는 구분하고, 병상 자료만으로 중증환자 수용을 확정하지 않습니다. 카카오 확인 ETA와 근삿값을 구분하고 검증 지표에는 확인 ETA만 넣습니다. |
+| `ai_server.py` | Model B는 후보 하나를 고르는 고정 목적함수이므로 반복 PuLP 풀이를 동일 목적함수의 내림차순 정렬로 교체했습니다. 동점이면 자원 점수와 기존 입력 순으로 정렬합니다. Groq 응답 형식과 예선 추론 강도 medium을 유지하고 같은 입력의 구조화 결과를 재사용합니다. low로 바꾸는 속도 실험은 항목별 정확도를 함께 재검증합니다. |
+| `server.ai.html` | DB 상태, 미확인 후보, 추정 ETA, 확인 건수 분모를 표시합니다. 공개 시연은 가상 위치로 시작합니다. 예전 수용 신청 버튼은 **이송 경로 시뮬레이션**으로 표시하며 실제 병원 전송과 환자 로그 저장을 하지 않습니다. |
+| `app.py` | 기존 Streamlit 관리는 로컬 유지보수용입니다. 로컬 동기화에는 양쪽에 같은 IEUM_SYNC_TOKEN이 필요합니다. Render의 자동 갱신 모드에서는 외부 DB 쓰기를 차단합니다. |
+| `Dockerfile`, `render.yaml`, `gunicorn.conf.py`, `requirements-web.txt`, `.env.example` | 단일 Docker 웹 서비스와 한 Gunicorn 프로세스를 지정했습니다. 프로세스 내부의 HTTP·WebSocket 스레드는 같은 스냅샷을 사용합니다. |
+| `tests/test_live_pipeline.py` | 외부 API 응답을 모의해 페이지 누락, 교차표 검증, 지연 중 이전 스냅샷, 재시작·만료, ETA 지표, 추천 흐름을 검증합니다. |
 
-### 2. 환경변수 (`.env`)
+기본 Render 설정은 재시작 시 공공 API에서 다시 받아오므로 첫 갱신 동안 추천이 대기합니다. 재시작 후에도 직전 유효 스냅샷이 필요하면 유료 Render 서비스에 디스크를 붙이고 마운트 경로 아래에 IEUM_SNAPSHOT_DIR=/var/data/ieum을 지정합니다. 파일이 복원되어도 기관 원본 시각에 같은 유효시간을 적용합니다.
 
-| 변수 | 사용처 | 설명 |
-| --- | --- | --- |
-| `GROQ_API_KEY` | IEUM-AI | Groq API 키 (필수) |
-| `GROQ_MODEL` | IEUM-AI | 기본값 `openai/gpt-oss-120b` |
-| `KAKAO_REST_API_KEY` | IEUM-AI | 카카오모빌리티 길찾기 REST 키 |
-| `KAKAO_JAVASCRIPT_KEY` | IEUM-AI | 카카오맵 JavaScript 키 |
-| `GOOGLE_CLOUD_PROJECT` | IEUM-AI | Google Cloud 프로젝트 ID (없으면 ADC에서 자동 탐지) |
-| `GOOGLE_APPLICATION_CREDENTIALS` | IEUM-AI | 서비스 계정 키 파일 경로 (배포 환경에서 STT 사용 시) |
-| `DB_MANAGER_URL` | IEUM-AI | DB 관리 웹 주소 (기본 `http://localhost:8501`) |
-| `SERVICE_KEY` | DB 관리 웹 | NEMC 응급의료기관 API 인증키 |
-| `HIRA_SERVICE_KEY` | DB 관리 웹 | HIRA 병원정보서비스 인증키 |
-| `HIRA_DETAIL_SERVICE_KEY` | DB 관리 웹 | HIRA 의료기관별상세정보서비스 인증키 |
-| `SAVER_URL` | DB 관리 웹 | IEUM-AI 주소 (기본 `http://127.0.0.1:5050`) |
-| `AUTO_REFRESH_ON_START` | DB 관리 웹 | 첫 접속 시 실시간 자동 갱신 여부 (기본 `1`, Render에서는 `0` 권장) |
-| `DEPARTMENT_UPDATE_LIMIT` | DB 관리 웹 | HIRA 상세정보 갱신 병원 수 (`0` = 전체) |
-| `TZ` | 공통 | 배포 서버 시간대. `Asia/Seoul`로 설정 |
+## 6. 검증 범위
 
-> API 키는 저장소에 올리지 말고 `.env`나 Render 환경변수로만 관리하세요.
+- 로컬 자동 검증 7개가 통과했습니다. Gunicorn에서 웹·상태 API와 키 미설정 시 추천 대기 응답을 확인했습니다.
+- 외부 응답을 대체하고 구조화된 가상 환자를 넘긴 Flask 테스트 20회에서 추천 API 중앙값 약 119ms, P95 약 182ms를 관측했습니다. STT, Groq, 카카오 네트워크, Render와 브라우저 시간은 측정에 포함되지 않았습니다.
+- 예선 음성부터 추천 화면까지 평균 34.4초는 첨부 실험지의 기존 값입니다. 실제 API 키를 사용하는 전국 조회와 최신 배포본의 전체 소요시간은 배포 후 4단계에서 확인해야 합니다.
+- 이 서비스는 전시용 연구 프로토타입입니다. 시험에는 프리셋이나 가상 사례를 사용합니다. 공개 데이터의 조건 충족은 병원 수용 확정과 별개이며, 실제 응급상황은 119에 연락합니다.
 
-### 3. 병원 DB 구축 (처음 한 번)
-```bash
-python build_national_master_db.py                          # 마스터 DB
-python update_realtime_resources_national.py                # 실시간 자원 매칭
-DEPARTMENT_UPDATE_LIMIT=0 python update_departments_hira_api.py   # HIRA 상세정보
-```
-저장소에는 이미 생성된 DB 파일이 들어 있으므로, 바로 실행만 하려면 이 단계는 건너뛰어도 됩니다.
+## 공식 문서
 
-### 4. 실행
-```bash
-# 터미널 1 — IEUM-AI (http://localhost:5050)
-python ai_server.py
-
-# 터미널 2 — 병원 DB 관리 웹 (http://localhost:8501)
-streamlit run app.py
-```
-
-### Render 배포 (예시)
-| 서비스 | Start Command | 주요 환경변수 |
-| --- | --- | --- |
-| IEUM-AI | `python ai_server.py` | `GROQ_API_KEY`, `KAKAO_*`, `DB_MANAGER_URL`, `TZ=Asia/Seoul` |
-| DB 관리 웹 | `streamlit run app.py --server.port $PORT --server.address 0.0.0.0` | `SERVICE_KEY`, `HIRA_*`, `SAVER_URL`, `AUTO_REFRESH_ON_START=0`, `TZ=Asia/Seoul` |
-
----
-
-## 실험 결과 요약
-
-| 실험 | 규모 | 결과 |
-| --- | --- | --- |
-| 음성 인식 | 4명 × 15문장 = 60건 | 핵심정보 보존율 **93.3%**, 의료용어 정확도 97.4%, 말더듬 처리 100% |
-| 모델 비교 | 8개 시나리오 × 5개 위치 × 4개 모델 = 160건 | Model B: 필수조건 충족률 **100%**, 1위 병원 평균 ETA 13.8분 |
-| End-to-End | 20건 (모바일 12, PC 8) | 성공률 **100%**, 평균 소요 34.4초 |
-
-모델 비교에서 **Model B(MILP)** 가 필수조건 충족률 100%를 유지했습니다. 최근접 모델(A)보다 평균 2.1분 늦을 뿐이어서, 사전에 정한 평가 기준에서 가장 균형 잡힌 모델로 최종 선정했습니다.
-
----
-
-## 한계와 개선 방향
-
-- **ETA 근사값**: 카카오 다중 목적지 조회에서 경로를 받지 못한 병원은 직선거리 기반 근사값을 사용하므로, 병원 선택 후의 실제 경로값과 차이가 날 수 있습니다. 무료 API 호출 한도 때문에, 추천 상위 병원만 단일 경로로 재확인하는 방식을 검토하고 있습니다.
-- **무료 인프라**: Render 무료 플랜에는 절전 모드와 512MB 메모리 제한이 있고, 무료 API에는 호출 한도가 있습니다.
-- **병원 연계**: 사전 수용 신청은 아직 실제 병원 시스템과 연동되지 않았고, 전송 기록(`dispatch_log.jsonl`)으로만 남습니다.
-- **진료과 데이터**: HIRA 진료과목에 '심장내과'와 '신생아과'가 따로 구분되어 있지 않습니다.
-
-> 본 프로젝트는 실험용 프로토타입이며, 실제 응급 상황의 의료적 판단을 대신하지 않습니다.
+- [GitHub에 로컬 코드 올리기](https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github)
+- [Render Blueprint](https://render.com/docs/blueprint-spec) · [무료 플랜](https://render.com/docs/free) · [환경변수와 Secret Files](https://render.com/docs/configure-environment-variables)
+- [국립중앙의료원 전국 응급의료기관 정보 조회](https://www.data.go.kr/data/15000563/openapi.do) · [심평원 의료기관별 상세정보](https://www.data.go.kr/data/15001699/openapi.do)
+- [카카오 앱 설정](https://developers.kakao.com/docs/latest/ko/app-setting/app) · [카카오모빌리티 다중 목적지 길찾기](https://developers.kakaomobility.com/guide/navi-api/destinations)
+- [Groq 구조화 출력](https://console.groq.com/docs/structured-outputs) · [Google Speech-to-Text Chirp 3](https://cloud.google.com/speech-to-text/v2/docs/models/chirp-3)

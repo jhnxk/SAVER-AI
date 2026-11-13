@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: ieum-ai
+    runtime: docker
+    plan: starter
+    numInstances: 1
+    healthCheckPath: /healthz
+    envVars:
+      - key: IEUM_LIVE_REFRESH
+        value: "1"
+      - key: IEUM_PUBLIC_DEMO
+        value: "1"
+      - key: NEMC_REFRESH_SECONDS
+        value: "180"
+      - key: NEMC_MAX_AGE_SECONDS
+        value: "900"
+      - key: SERVICE_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: KAKAO_REST_API_KEY
+        sync: false
+      - key: KAKAO_JAVASCRIPT_KEY
+        sync: false

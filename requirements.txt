@@ -3,6 +3,7 @@ streamlit-autorefresh
 pandas
 numpy
 openpyxl
+XlsxWriter==3.2.9
 requests
 python-dotenv
 flask

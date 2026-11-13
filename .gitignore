@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+dispatch_log.jsonl
+.nemc-cache/
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store

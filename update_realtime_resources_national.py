@@ -7,6 +7,7 @@ import pandas as pd
 
 from pathlib import Path
 from datetime import datetime
+from importlib.util import find_spec
 
 from api_client import fetch_realtime_beds
 
@@ -24,7 +25,6 @@ SIDO_LIST = [
     "부산광역시",
     "대구광역시",
     "인천광역시",
-    "광주광역시",
     "대전광역시",
     "울산광역시",
     "세종특별자치시",
@@ -33,11 +33,10 @@ SIDO_LIST = [
     "충청북도",
     "충청남도",
     "전북특별자치도",
-    "전라남도",
     "경상북도",
     "경상남도",
     "제주특별자치도",
-    # 2026년 행정구역 반영 데이터가 들어오는 경우 대비
+    # 옛 광주·전남 관할의 실시간 데이터는 통합 지역명으로 조회한다.
     "전남광주통합특별시",
 ]
 
@@ -386,9 +385,14 @@ def fetch_national_realtime_api():
     print("[2/4] 전국 응급의료기관 실시간 API 호출 중 (최대 4개 병렬)...")
 
     all_dfs = []
+    request_seconds = {}
 
     def fetch_one(index, sido):
-        df = fetch_realtime_beds(stage1=sido)
+        started_at = time.perf_counter()
+        try:
+            df = fetch_realtime_beds(stage1=sido)
+        finally:
+            request_seconds[index] = time.perf_counter() - started_at
         if df is not None and not df.empty:
             df = df.copy()
             df["api_query_sido"] = sido
@@ -403,13 +407,15 @@ def fetch_national_realtime_api():
             idx, sido = futures[future]
             try:
                 _, _, df = future.result()
+                elapsed = request_seconds[idx]
                 if df is not None and not df.empty:
                     all_dfs.append(df)
-                    print(f"  - [{idx}/{len(SIDO_LIST)}] {sido}: {len(df)}건")
+                    print(f"  - [{idx}/{len(SIDO_LIST)}] {sido}: {len(df)}건 ({elapsed:.2f}초)")
                 else:
-                    print(f"  - [{idx}/{len(SIDO_LIST)}] {sido}: 0건")
+                    print(f"  - [{idx}/{len(SIDO_LIST)}] {sido}: 0건 ({elapsed:.2f}초)")
             except Exception as e:
-                print(f"  - [{idx}/{len(SIDO_LIST)}] {sido} 실패: {e}")
+                elapsed = request_seconds.get(idx, 0)
+                print(f"  - [{idx}/{len(SIDO_LIST)}] {sido} 실패 ({elapsed:.2f}초): {type(e).__name__}")
 
     if not all_dfs:
         print("    ! 실시간 API에서 수집된 데이터가 없습니다.")
@@ -426,53 +432,40 @@ def fetch_national_realtime_api():
 # 4. 매칭 로직
 # =========================================================
 
-def filter_by_region_candidates(master_row, realtime_df):
-    """
-    병원명 유사도 매칭 전에 주소/시도 기반으로 후보를 줄인다.
-    """
+def filter_by_region_candidates(master_row, search_columns, all_positions):
+    """Filter row positions in the original order, retaining the prior nonempty fallback."""
     master_sido = str(master_row.get("_master_sido_short", "")).strip()
     master_addr = str(master_row.get("_master_norm_address", "")).strip()
     master_sigungu = str(master_row.get("sigungu", "")).strip()
 
-    candidates = realtime_df.copy()
-
-    # 주소에 시도명이 들어 있으면 우선 필터
+    addresses = search_columns["_api_address"]
+    positions = all_positions
     if master_sido:
-        mask = (
-            candidates.get("api_query_sido", "").astype(str).apply(normalize_sido).eq(master_sido)
-            | candidates["_api_address"].astype(str).str.contains(master_sido, na=False)
-        )
+        pattern = re.compile(master_sido)
+        regions = search_columns["api_query_sido"]
+        region_positions = [
+            pos for pos in positions
+            if regions[pos] == master_sido or pattern.search(addresses[pos])
+        ]
+        positions = region_positions or positions
 
-        region_candidates = candidates[mask].copy()
+    if master_sigungu:
+        pattern = re.compile(master_sigungu)
+        district_positions = [pos for pos in positions if pattern.search(addresses[pos])]
+        positions = district_positions or positions
 
-        if not region_candidates.empty:
-            candidates = region_candidates
-
-    # 시군구가 주소에 보이면 추가 필터
-    if master_sigungu and "_api_address" in candidates.columns:
-        sigungu_candidates = candidates[
-            candidates["_api_address"].astype(str).str.contains(master_sigungu, na=False)
-        ].copy()
-
-        if not sigungu_candidates.empty:
-            candidates = sigungu_candidates
-
-    # 주소 앞부분이 유사하면 추가 필터
     if master_addr:
-        short_addr = master_addr[:6]
+        pattern = re.compile(master_addr[:6])
+        normalized_addresses = search_columns["_api_norm_address"]
+        address_positions = [
+            pos for pos in positions if pattern.search(normalized_addresses[pos])
+        ]
+        positions = address_positions or positions
 
-        if short_addr:
-            addr_candidates = candidates[
-                candidates["_api_norm_address"].astype(str).str.contains(short_addr, na=False)
-            ].copy()
-
-            if not addr_candidates.empty:
-                candidates = addr_candidates
-
-    return candidates
+    return positions
 
 
-def find_best_match(master_row, realtime_df):
+def find_best_match(master_row, realtime_df, search_columns, all_positions):
     """
     한 개 마스터 병원에 대해 가장 적절한 API 행을 찾는다.
     매칭 순서:
@@ -491,51 +484,40 @@ def find_best_match(master_row, realtime_df):
 
     # 1. hpid 정확 매칭
     if master_hpid and master_hpid.lower() not in ["nan", "none"]:
-        hpid_matches = realtime_df[
-            realtime_df["_api_hpid"].astype(str).str.strip() == master_hpid
-        ].copy()
-
-        if not hpid_matches.empty:
-            api_row = hpid_matches.iloc[0].to_dict()
+        hpid_matches = realtime_df["_api_hpid"].eq(master_hpid).to_numpy().nonzero()[0]
+        if hpid_matches.size:
+            api_row = realtime_df.iloc[hpid_matches[0]].to_dict()
             return api_row, "hpid_exact", 100, "hpid 정확 매칭"
 
-    region_candidates = filter_by_region_candidates(master_row, realtime_df)
-
-    if region_candidates.empty:
-        region_candidates = realtime_df.copy()
+    positions = filter_by_region_candidates(master_row, search_columns, all_positions)
+    names = search_columns["_api_norm_name"]
 
     # 2. 병원명 완전 일치
-    exact_matches = region_candidates[
-        region_candidates["_api_norm_name"] == master_norm
-    ].copy()
-
-    if not exact_matches.empty:
-        api_row = exact_matches.iloc[0].to_dict()
-        return api_row, "name_exact", 95, "정규화 병원명 완전 일치"
+    for pos in positions:
+        if names[pos] == master_norm:
+            api_row = realtime_df.iloc[pos].to_dict()
+            return api_row, "name_exact", 95, "정규화 병원명 완전 일치"
 
     # 3. 병원명 포함 관계
-    contains_matches = region_candidates[
-        region_candidates["_api_norm_name"].apply(
-            lambda x: master_norm in x or x in master_norm if x else False
-        )
-    ].copy()
-
-    if not contains_matches.empty:
-        # 가장 이름 길이 차이가 작은 것 선택
-        contains_matches["_len_diff"] = contains_matches["_api_norm_name"].apply(
-            lambda x: abs(len(str(x)) - len(master_norm))
-        )
-        contains_matches = contains_matches.sort_values("_len_diff")
-        api_row = contains_matches.iloc[0].to_dict()
+    lengths = {
+        pos: abs(len(names[pos]) - len(master_norm))
+        for pos in positions
+        if names[pos] and (master_norm in names[pos] or names[pos] in master_norm)
+    }
+    if lengths:
+        # Keep the same pandas sort, including its tie ordering.
+        pos = pd.Series(lengths).sort_values().index[0]
+        api_row = realtime_df.iloc[pos].to_dict()
         return api_row, "name_contains", 88, "정규화 병원명 포함 관계 매칭"
 
     # 4. fuzzy matching
-    best_row = None
+    best_position = None
     best_score = 0.0
+    master_addr = str(master_row.get("_master_norm_address", "")).strip()
 
-    for _, api_row_series in region_candidates.iterrows():
-        api_row = api_row_series.to_dict()
-        api_norm = str(api_row.get("_api_norm_name", "")).strip()
+    normalized_addresses = search_columns["_api_norm_address"]
+    for position in positions:
+        api_norm = names[position].strip()
 
         if not api_norm:
             continue
@@ -543,8 +525,7 @@ def find_best_match(master_row, realtime_df):
         score = difflib.SequenceMatcher(None, master_norm, api_norm).ratio()
 
         # 주소 유사성이 있으면 약간 가산
-        master_addr = str(master_row.get("_master_norm_address", "")).strip()
-        api_addr = str(api_row.get("_api_norm_address", "")).strip()
+        api_addr = normalized_addresses[position].strip()
 
         if master_addr and api_addr:
             addr_score = difflib.SequenceMatcher(None, master_addr[:12], api_addr[:12]).ratio()
@@ -552,9 +533,10 @@ def find_best_match(master_row, realtime_df):
 
         if score > best_score:
             best_score = score
-            best_row = api_row
+            best_position = position
 
-    if best_row is not None and best_score >= FUZZY_THRESHOLD:
+    if best_position is not None and best_score >= FUZZY_THRESHOLD:
+        best_row = realtime_df.iloc[best_position].to_dict()
         return (
             best_row,
             "fuzzy_name_region",
@@ -572,7 +554,17 @@ def merge_master_with_realtime(master_df, realtime_df):
     print("[3/4] 전국 병원 마스터 DB와 실시간 API 매칭 중...")
 
     master = prepare_master_df(master_df)
-    realtime = prepare_realtime_df(realtime_df)
+    # Keep row order and use positional IDs, including when source labels repeat.
+    realtime = prepare_realtime_df(realtime_df).reset_index(drop=True)
+    search_columns = {
+        col: realtime[col].tolist()
+        for col in ("_api_address", "_api_norm_address", "_api_norm_name")
+    }
+    search_columns["api_query_sido"] = (
+        realtime["api_query_sido"].astype(str).apply(normalize_sido).tolist()
+        if "api_query_sido" in realtime.columns else [""] * len(realtime)
+    )
+    all_positions = range(len(realtime))
 
     merged_rows = []
 
@@ -583,7 +575,7 @@ def merge_master_with_realtime(master_df, realtime_df):
         if (idx + 1) % 50 == 0:
             print(f"  - {idx + 1}/{len(master)}개 병원 처리 중...")
 
-        api_row, method, score, note = find_best_match(master_row, realtime)
+        api_row, method, score, note = find_best_match(master_row, realtime, search_columns, all_positions)
 
         if api_row is None:
             merged = mark_unmatched(master_row, note)
@@ -692,8 +684,7 @@ def merge_master_with_realtime(master_df, realtime_df):
 # 5. 파일 읽기/저장
 # =========================================================
 
-def choose_master_sheet(excel_file):
-    xls = pd.ExcelFile(excel_file)
+def choose_master_sheet(xls):
 
     preferred_sheets = [
         "hospital_master",
@@ -718,8 +709,9 @@ def load_master_db():
             f"{INPUT_FILE} 파일이 없습니다. 먼저 build_national_master_db.py를 실행하세요."
         )
 
-    sheet_name = choose_master_sheet(INPUT_FILE)
-    master = pd.read_excel(INPUT_FILE, sheet_name=sheet_name)
+    with pd.ExcelFile(INPUT_FILE) as workbook:
+        sheet_name = choose_master_sheet(workbook)
+        master = workbook.parse(sheet_name)
 
     print(f"    - 파일: {INPUT_FILE}")
     print(f"    - 시트: {sheet_name}")
@@ -759,7 +751,16 @@ def save_output(merged_df, realtime_raw):
         )
         match_method_summary.columns = ["match_method", "count"]
 
-    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
+    if find_spec("xlsxwriter") is None:
+        engine = "openpyxl"
+        engine_kwargs = {}
+        print("    - 저장 엔진: openpyxl (xlsxwriter 미설치)")
+    else:
+        engine = "xlsxwriter"
+        engine_kwargs = {"options": {"strings_to_urls": False}}
+        print("    - 저장 엔진: xlsxwriter")
+
+    with pd.ExcelWriter(OUTPUT_FILE, engine=engine, engine_kwargs=engine_kwargs) as writer:
         merged_df.to_excel(writer, index=False, sheet_name="national_hospital_db")
         matched.to_excel(writer, index=False, sheet_name="matched_only")
         unmatched.to_excel(writer, index=False, sheet_name="unmatched_only")
@@ -795,17 +796,29 @@ def main():
     print("전국 병원 DB 실시간 응급자원 업데이트 시작")
     print("==============================================")
 
+    started_at = time.perf_counter()
     master = load_master_db()
+    master_loaded_at = time.perf_counter()
 
     realtime_raw = fetch_national_realtime_api()
+    api_finished_at = time.perf_counter()
 
     if realtime_raw.empty:
-        print("실시간 API 데이터가 비어 있어 작업을 종료합니다.")
-        return
+        raise RuntimeError("실시간 API 응답이 비어 있습니다. 이전 파일을 이번 갱신 결과로 반영하지 않습니다.")
 
     merged_df = merge_master_with_realtime(master, realtime_raw)
+    matching_finished_at = time.perf_counter()
 
     save_output(merged_df, realtime_raw)
+    finished_at = time.perf_counter()
+
+    print(
+        f"[시간 측정] 마스터 읽기 {master_loaded_at - started_at:.2f}초 / "
+        f"전국 API 수집 {api_finished_at - master_loaded_at:.2f}초 / "
+        f"병원 매칭 {matching_finished_at - api_finished_at:.2f}초 / "
+        f"엑셀 저장 {finished_at - matching_finished_at:.2f}초 / "
+        f"스크립트 합계 {finished_at - started_at:.2f}초"
+    )
 
     print("==============================================")
     print("작업 완료")

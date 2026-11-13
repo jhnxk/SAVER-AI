@@ -4,7 +4,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import requests
@@ -38,6 +38,7 @@ DEPARTMENT_UPDATE_SCRIPT = "update_departments_hira_api.py"
 
 RECOMMENDATION_SYSTEM_URL = os.getenv("SAVER_URL", "http://127.0.0.1:5050").rstrip("/")
 SAVER_SYNC_URL = f"{RECOMMENDATION_SYSTEM_URL}/api/sync-hospitals"
+KST = timezone(timedelta(hours=9), "KST")
 
 # 앱 최초 접속 시 NEMC 실시간 자동 갱신 여부.
 # 기본값은 켜짐(로컬 동작 유지). Render에서는 AUTO_REFRESH_ON_START=0 으로 끈다.
@@ -87,28 +88,17 @@ for key, value in default_states.items():
 # 3. 공통 함수
 # =========================================================
 
+def kst_timestamp():
+    return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
 def add_log(message):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = kst_timestamp()
     st.session_state.run_log.append(f"[{now}] {message}")
     st.session_state.run_log = st.session_state.run_log[-40:]
 
-# 서버 전체(모든 브라우저 접속)가 공유하는 최신 갱신 결과.
-# st.session_state는 접속마다 따로라서 창을 닫으면 사라지므로,
-# 갱신 결과를 여기에 함께 저장해 새로 접속해도 마지막 갱신 상태를 보여준다.
-# (서버가 재시작·절전되면 비워진다.)
-@st.cache_resource
-def get_shared_db_state():
-    return {"hospital_df": None, "last_fetch": None}
 
-
-def save_shared_db_state(df, last_fetch):
-    shared = get_shared_db_state()
-    shared["hospital_df"] = df.copy()
-    shared["last_fetch"] = last_fetch
-
-
-def choose_sheet_name(excel_file):
-    xls = pd.ExcelFile(excel_file)
+def choose_sheet_name(xls):
 
     preferred_sheets = [
         "national_hospital_db",
@@ -153,14 +143,20 @@ def load_hospital_db(excel_file):
     if not os.path.exists(excel_file):
         raise FileNotFoundError(f"{excel_file} 파일이 없습니다.")
 
-    sheet_name = choose_sheet_name(excel_file)
-    df = pd.read_excel(excel_file, sheet_name=sheet_name)
+    path = Path(excel_file).resolve()
+    return _read_hospital_db(str(path), path.stat().st_mtime_ns)
+
+
+@st.cache_data(max_entries=4, show_spinner=False)
+def _read_hospital_db(excel_file, modified_at):
+    with pd.ExcelFile(excel_file) as workbook:
+        sheet_name = choose_sheet_name(workbook)
+        df = workbook.parse(sheet_name)
 
     df = remove_hidden_columns(df)
     df = format_hvidate(df)
 
     return df, sheet_name
-
 
 
 # 실시간 API 파일에서 현재값으로 갱신할 컬럼만 지정한다.
@@ -260,15 +256,18 @@ def sync_current_db_to_saver(df=None):
     payload = {
         "hospitals": hospitals,
         "source": "streamlit_runtime",
-        "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "synced_at": kst_timestamp(),
         "db_updated_at": st.session_state.last_fetch,
     }
+
+    token = os.getenv("IEUM_SYNC_TOKEN", "").strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     # Render 무료 플랜에서 SAVER가 잠들어 있으면 첫 요청이 실패할 수 있어 1회 재시도
     response = None
     for attempt in range(2):
         try:
-            response = requests.post(SAVER_SYNC_URL, json=payload, timeout=90)
+            response = requests.post(SAVER_SYNC_URL, json=payload, headers=headers, timeout=90)
             break
         except requests.exceptions.RequestException as e:
             if attempt == 1:
@@ -344,6 +343,7 @@ def refresh_realtime_data(trigger="수동"):
     st.session_state.saver_sync_count = 0
     st.session_state.last_realtime_attempt_epoch = time.time()
 
+    started_at = time.perf_counter()
     add_log(f"전국 실시간 응급자원 API 데이터 새로고침 시작 ({trigger})")
 
     try:
@@ -358,6 +358,7 @@ def refresh_realtime_data(trigger="수동"):
             )
 
         run_script(NATIONAL_UPDATE_SCRIPT)
+        script_finished_at = time.perf_counter()
 
         if not Path(REALTIME_FILE).exists():
             raise FileNotFoundError(
@@ -368,6 +369,7 @@ def refresh_realtime_data(trigger="수동"):
         # 실시간 API 관련 컬럼만 방금 생성된 realtime 파일에서 갱신한다.
         base_df, base_sheet_name = load_hospital_db(DEFAULT_FILE)
         realtime_df, realtime_sheet_name = load_hospital_db(REALTIME_FILE)
+        files_loaded_at = time.perf_counter()
 
         df, merge_key, merged_count = merge_realtime_into_hira_db(
             base_df,
@@ -375,9 +377,8 @@ def refresh_realtime_data(trigger="수동"):
         )
 
         st.session_state.hospital_df = df
-        st.session_state.last_fetch = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.last_fetch = kst_timestamp()
         st.session_state.last_realtime_refresh_epoch = time.time()
-        save_shared_db_state(df, st.session_state.last_fetch)
         st.session_state.run_status = "실시간 갱신 완료"
         st.session_state.excel_saved = False
 
@@ -387,6 +388,7 @@ def refresh_realtime_data(trigger="수동"):
             f"병합키 {merge_key} / {merged_count}개 병원 병합"
         )
 
+        sync_started_at = time.perf_counter()
         try:
             sync_current_db_to_saver(df)
             add_log("엑셀 저장 없이 현재 DB를 IEUM-AI에 바로 전달했습니다.")
@@ -394,6 +396,15 @@ def refresh_realtime_data(trigger="수동"):
             st.session_state.saver_synced = False
             st.session_state.saver_sync_count = 0
             add_log(f"IEUM-AI 자동 동기화 실패: {sync_error}")
+        finally:
+            finished_at = time.perf_counter()
+            add_log(
+                f"[갱신 시간] 스크립트 실행 {script_finished_at - started_at:.2f}초 / "
+                f"엑셀 다시 읽기 {files_loaded_at - script_finished_at:.2f}초 / "
+                f"HIRA 병합 {sync_started_at - files_loaded_at:.2f}초 / "
+                f"IEUM 동기화 {finished_at - sync_started_at:.2f}초 / "
+                f"서버 합계 {finished_at - started_at:.2f}초"
+            )
 
         return True
 
@@ -443,8 +454,7 @@ def refresh_department_data():
             )
 
         st.session_state.hospital_df = df
-        st.session_state.last_fetch = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        save_shared_db_state(df, st.session_state.last_fetch)
+        st.session_state.last_fetch = kst_timestamp()
         st.session_state.run_status = "HIRA 상세정보 갱신 완료"
         st.session_state.excel_saved = False
 
@@ -474,7 +484,7 @@ def load_current_file_to_session(db_file):
         st.session_state.saver_synced = False
         st.session_state.saver_sync_count = 0
         add_log(f"파일 로드 완료: {db_file} / 시트 {sheet_name} / {len(df)}개 병원")
-        add_log("IEUM-AI 반영은 [실시간 API 새로고침] 후 자동으로 이루어집니다.")
+        add_log("IEUM-AI 반영을 위해 [IEUM-AI 동기화]를 눌러주세요.")
 
     except Exception as e:
         st.session_state.fetch_error = str(e)
@@ -689,7 +699,7 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button("현재 파일 다시 불러오기", width="stretch"):
+    if st.button("현재 파일 다시 불러오기", use_container_width=True):
         load_current_file_to_session(db_file)
 
 
@@ -710,14 +720,7 @@ else:
 # =========================================================
 
 if st.session_state.hospital_df is None:
-    shared_state = get_shared_db_state()
-
-    if shared_state["hospital_df"] is not None:
-        # 다른 접속에서 갱신한 최신 결과가 서버에 있으면 파일 대신 그것을 사용한다.
-        st.session_state.hospital_df = shared_state["hospital_df"].copy()
-        st.session_state.last_fetch = shared_state["last_fetch"]
-        add_log(f"서버에 저장된 최근 갱신 결과를 불러왔습니다 (갱신 시각 {shared_state['last_fetch']}).")
-    elif Path(db_file).exists():
+    if Path(db_file).exists():
         load_current_file_to_session(db_file)
     elif Path(DEFAULT_FILE).exists():
         load_current_file_to_session(DEFAULT_FILE)
@@ -754,27 +757,36 @@ handle_periodic_realtime_refresh(auto_refresh_tick)
 col1, col2, col3, col4, col5 = st.columns([1.2, 1.2, 1.2, 1, 2.4])
 
 with col1:
-    if st.button("실시간 API 새로고침", type="primary", width="stretch"):
-        with st.spinner("전국 병원 데이터를 불러오고 있어 시간이 다소 걸릴 수 있습니다."):
-            refresh_realtime_data(trigger="수동 버튼")
+    if st.button("실시간 API 새로고침", type="primary", use_container_width=True):
+        refresh_realtime_data(trigger="수동 버튼")
 
 with col2:
-    if st.button("HIRA 상세정보 갱신", width="stretch"):
+    if st.button("HIRA 상세정보 갱신", use_container_width=True):
         refresh_department_data()
 
 with col3:
+    if st.button("IEUM-AI 동기화", use_container_width=True):
+        try:
+            save_current_db_for_app_and_saver()
+        except Exception as e:
+            st.session_state.fetch_error = str(e)
+            st.session_state.run_status = "오류 발생"
+            st.session_state.saver_synced = False
+            st.session_state.saver_sync_count = 0
+            add_log(f"IEUM-AI 동기화 오류: {e}")
+
     st.link_button(
         "🚑 IEUM-AI 실행",
         url=RECOMMENDATION_SYSTEM_URL,
         type="primary",
-        width="stretch",
+        use_container_width=True,
     )
 
     if st.session_state.saver_synced:
         st.caption(f"IEUM-AI 동기화 완료: {st.session_state.saver_sync_count}개 병원")
 
 with col4:
-    if st.button("수행 멈춤", width="stretch"):
+    if st.button("수행 멈춤", use_container_width=True):
         reset_execution_state()
 
 with col5:
@@ -1005,7 +1017,7 @@ if not display_cols:
 
 st.dataframe(
     filtered_df[display_cols],
-    width="stretch",
+    use_container_width=True,
     height=520,
 )
 
@@ -1057,20 +1069,33 @@ st.divider()
 
 st.subheader("IEUM-AI 추천 시스템 연결")
 
-st.info(
-    "최신 업데이트된 DB가 IEUM-AI에 동기화되어 있습니다."
-    "갱신된 병원 DB를 IEUM-AI 서버 메모리에 보관해 병원 추천에 바로 사용합니다."
-)
+if st.session_state.saver_synced:
+    st.success(
+        f"현재 DB {st.session_state.saver_sync_count}개 병원이 IEUM-AI 메모리에 동기화되었습니다."
+    )
 
-st.link_button(
-    "🚑 IEUM-AI 실행",
-    url=RECOMMENDATION_SYSTEM_URL,
-    width="stretch",
-)
+    st.link_button(
+        "🚑 IEUM-AI 실행",
+        url=RECOMMENDATION_SYSTEM_URL,
+        type="primary",
+        use_container_width=True,
+    )
 
-st.caption(
-    "이 버튼으로 이동하면 IEUM-AI는 Excel 저장본보다 현재 동기화된 메모리 DB를 우선 사용합니다."
-)
+    st.caption(
+        "이 버튼으로 이동하면 IEUM-AI는 Excel 저장본보다 현재 동기화된 메모리 DB를 우선 사용합니다."
+    )
+
+else:
+    st.warning(
+        "현재 DB가 IEUM-AI에 아직 동기화되지 않았습니다. "
+        "[IEUM-AI 동기화]를 누르면 Excel 파일을 덮어쓰지 않고 바로 전달됩니다."
+    )
+
+    st.link_button(
+        "🚑 IEUM-AI 화면만 열기",
+        url=RECOMMENDATION_SYSTEM_URL,
+        use_container_width=True,
+    )
 
 
 # =========================================================

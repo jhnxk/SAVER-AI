@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>병원 DB · IEUM</title>
+<style>
+body { margin:0; background:#0f172a; color:#e2e8f0; font:16px system-ui,sans-serif }
+main { max-width:1100px; margin:auto; padding:1rem }
+header, section { background:#1e293b; padding:1rem; margin-bottom:1rem; border-radius:.75rem }
+h1 { margin:.3rem 0; color:white }
+a { color:#99f6e4 }
+form { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem }
+input, button { font:inherit; padding:.5rem; border-radius:.35rem }
+button { cursor:pointer; color:#042f2e; background:#99f6e4; border:0 }
+button:disabled { opacity:.55 }
+.table-wrap { overflow:auto }
+table { width:100%; border-collapse:collapse; white-space:nowrap }
+td, th { text-align:left; padding:.55rem; border-bottom:1px solid #475569 }
+caption { text-align:left; padding-bottom:.5rem }
+#feedback { min-height:1.25em }
+</style>
+<main>
+<header>
+<a href="/">← IEUM 병원 추천으로 돌아가기</a>
+<h1>응급의료기관 DB</h1>
+<p>IEUM 추천에 사용되는 병상 정보입니다. 실제 병원 수용은 별도 확인이 필요합니다.</p>
+</header>
+<section>
+{% if live %}
+<p>최신 관측 <strong>{{ meta.fresh_count }}곳</strong> / 전체 {{ meta.hospital_count }}곳
+ · {{ '자동 갱신 켜짐' if automatic else '자동 갱신 꺼짐' }}</p>
+<p>마지막 성공 조회 {{ meta.db_updated_at or '아직 없음' }}</p>
+{% if not meta.fresh_count %}<p>유효한 최신 관측이 없어 IEUM 추천을 대기합니다.</p>{% endif %}
+{% elif meta.status == 'legacy' %}
+<p>외부 DB 관리 화면에서 동기화한 데이터입니다.</p>
+{% else %}
+<p>과거 샘플 데이터입니다.</p>
+{% endif %}
+{% if manual_enabled %}
+<form id="refresh" action="/api/refresh-hospitals" method="post">
+<label for="token">관리 코드</label>
+<input id="token" name="token" type="password" required autocomplete="off">
+<button type="submit">실시간 병상 갱신</button>
+</form>
+<p>갱신 요청은 서버 전체에서 {{ cooldown // 60 }}분에 한 번만 실행합니다.</p>
+<p id="feedback" role="status" aria-live="polite"></p>
+{% endif %}
+</section>
+<section class="table-wrap">
+<table>
+<caption>병원별 병상 관측</caption>
+<thead><tr><th>병원</th><th>지역</th><th>응급실</th><th>중환자실</th><th>수술실</th><th>기관 원본 시각</th><th>관측 상태</th></tr></thead>
+<tbody>
+{% set labels = {'OK': '최신', 'STALE': '만료', 'UNVERIFIED': '미확인'} %}
+{% for row in rows %}
+<tr>
+<td>{{ row.hospital_name or '—' }}</td><td>{{ row.sido or '—' }}</td>
+<td>{{ row.hvec if row.hvec != '' else '—' }}</td>
+<td>{{ row.hvicc if row.hvicc != '' else '—' }}</td>
+<td>{{ row.hvoc if row.hvoc != '' else '—' }}</td>
+<td>{{ row.hvidate or '—' }}</td><td>{{ labels.get(row.realtime_match_status, '참고') if live else '참고' }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</section>
+</main>
+{% if manual_enabled %}
+<script>
+document.querySelector("#refresh").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const feedback = document.querySelector("#feedback");
+  const formData = new FormData(form);
+  form.reset();
+  button.disabled = true;
+  feedback.textContent = "공공데이터에서 병상 정보를 확인 중입니다.";
+  try {
+    const response = await fetch(form.action, { method: "POST", body: formData });
+    const result = await response.json();
+    if (result.success) {
+      location.reload();
+      return;
+    }
+    feedback.textContent = result.message || "갱신하지 못했어요.";
+  } catch (error) {
+    feedback.textContent = "갱신 결과를 불러오지 못했어요. 잠시 후 페이지를 새로고침해 주세요.";
+  }
+  button.disabled = false;
+});
+</script>
+{% endif %}
+</html>
