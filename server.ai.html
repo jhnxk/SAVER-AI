@@ -347,20 +347,20 @@
         </div>
 
         <div class="overflow-x-auto rounded-lg border border-slate-800">
-          <table class="w-full text-left text-xs text-slate-300">
+          <table class="w-full md:min-w-[1200px] text-left text-xs text-slate-300">
             <thead class="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
               <tr>
-                <th class="p-2.5">순위 / 병원명</th>
-                <th id="modelScoreHeader" class="hidden md:table-cell p-2.5 text-center">추천 점수</th>
-                <th class="hidden md:table-cell p-2.5 text-center">응급실 병상</th>
-                <th class="hidden md:table-cell p-2.5 text-center">ICU 가용병상</th>
-                <th class="hidden md:table-cell p-2.5 text-center">수술실</th>
-                <th class="hidden md:table-cell p-2.5 text-center">보유 장비</th>
-                <th class="hidden md:table-cell p-2.5">필수 진료과</th>
-                <th class="hidden md:table-cell p-2.5 text-center">예상 이송시간</th>
-                <th class="hidden md:table-cell p-2.5 text-center">예상 이송거리</th>
-                <th class="hidden md:table-cell p-2.5 text-center">최종 판정</th>
-                <th class="p-2.5">주요 사유</th>
+                <th class="p-2.5 md:min-w-[190px]">순위 / 병원명</th>
+                <th id="modelScoreHeader" class="hidden md:table-cell p-2.5 text-center whitespace-nowrap min-w-[80px]">추천 점수</th>
+                <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap min-w-[80px]">응급실 병상</th>
+                <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap min-w-[90px]">ICU 가용병상</th>
+                <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap min-w-[60px]">수술실</th>
+                <th class="hidden md:table-cell p-2.5 text-center min-w-[140px]">보유 장비</th>
+                <th class="hidden md:table-cell p-2.5 min-w-[190px]">필수 진료과</th>
+                <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap min-w-[90px]">예상 이송시간</th>
+                <th class="hidden md:table-cell p-2.5 text-center whitespace-nowrap min-w-[90px]">예상 이송거리</th>
+                <th class="hidden md:table-cell p-2.5 text-center min-w-[150px]">최종 판정</th>
+                <th class="p-2.5 md:min-w-[260px]">주요 사유</th>
               </tr>
             </thead>
             <tbody id="hospitalTableBody" class="divide-y divide-slate-800/60 bg-slate-900/50">
@@ -601,7 +601,7 @@
       if (!hospital) return "-";
       const value = Number(hospital.model_score);
       if (!Number.isFinite(value)) return "-";
-      return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2)}점`;
+      return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}점`;
     }
 
     async function selectModel(modelKey) {
@@ -1300,14 +1300,14 @@
 
         tr.innerHTML = `
           <td class="py-3 px-2 text-sm font-bold text-slate-200">${isAvailable ? `${idx + 1}.` : "제외 ·"} ${escapeHtml(hospitalName)}${mobileDetailHtml}</td>
-          <td class="hidden md:table-cell py-3 px-2 text-center text-sm text-emerald-400 font-bold" title="${escapeHtml(h.model_score_label || '추천 점수')}">${escapeHtml(recommendationScoreText)}</td>
-          <td class="hidden md:table-cell py-3 px-2 text-center text-sm font-semibold ${Number(erBeds) > 0 ? "text-emerald-400" : "text-rose-400"}">${escapeHtml(erBeds)}석</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-sm text-emerald-400 font-bold whitespace-nowrap" title="${escapeHtml(h.model_score_label || '추천 점수')}">${escapeHtml(recommendationScoreText)}</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-sm font-semibold ${Number(erBeds) > 0 ? "text-emerald-400" : "text-rose-400"} whitespace-nowrap">${escapeHtml(erBeds)}석</td>
           <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(icuText)}</td>
-          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(orRooms)}실</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300 whitespace-nowrap">${escapeHtml(orRooms)}실</td>
           <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-400 max-w-[160px] whitespace-normal">${escapeHtml(availableEquipList.join(", ") || "-")}</td>
           <td class="hidden md:table-cell py-3 px-2 text-[11px] ${specialistClass} max-w-[180px] whitespace-normal">${escapeHtml(specialistText)}<br><span class="text-slate-500">${escapeHtml(h.required_specialist_count_text || "")}</span></td>
-          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-blue-300 font-semibold">${escapeHtml(etaText)}</td>
-          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300">${escapeHtml(distanceText)}</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-blue-300 font-semibold whitespace-nowrap">${escapeHtml(etaText)}</td>
+          <td class="hidden md:table-cell py-3 px-2 text-center text-xs text-slate-300 whitespace-nowrap">${escapeHtml(distanceText)}</td>
           <td class="hidden md:table-cell py-3 px-2 text-center">${statusBadge}</td>
           <td class="py-3 px-2 text-[11px] max-w-[420px]">${makeReasonDetails(reasonText, reasonClass)}</td>
         `;
